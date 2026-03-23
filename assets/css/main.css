@@ -1,0 +1,1156 @@
+/*
+  main.css — merged app chrome + DigiPRO panel styles
+
+  Goals:
+  - High-contrast dark UI everywhere (no invisible whites / washed-out text)
+  - Consistent focus rings and hover states
+  - Keep layout + functionality identical (CSS only)
+*/
+
+/* ============================================================
+   Theme tokens (Dark)
+   ============================================================ */
+
+:root {
+  /* Dark theme tokens */
+  --bg: #0b0f14;
+  --panel: #0f1620;
+  --panel-2: #121c28;
+  --text: #e6edf3;
+  --muted: #a9b4c0;
+  --faint: #6b7785;
+
+  --border: rgba(230, 237, 243, 0.10);
+  --border-strong: rgba(230, 237, 243, 0.18);
+
+  --accent: #4cc9f0;
+  --accent-2: #8be9fd;
+
+  --danger: #ff5c7a;
+  --ok: #52ffa8;
+
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+  --radius: 14px;
+
+  --focus: 0 0 0 3px rgba(76, 201, 240, 0.35);
+
+  /* Extra internal tokens (allowed) */
+  --warn: #fbbf24;
+  --radius-sm: 10px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+
+  /* Legacy hooks used by extracted DigiPRO CSS */
+  --panel-border: var(--border-strong);
+  --slot-active: rgba(76, 201, 240, 0.95);
+  --slot-selected: rgba(251, 191, 36, 0.95);
+
+  /* ============================================================
+     DigiPRO — FX grid sizing (special buttons)
+
+     Goal:
+       Make the special button grid wider (more columns) so it
+       consumes *less* vertical space. This reduces the overall
+       height of the top row, which in turn makes more DigiPRO
+       slots visible on-screen.
+
+     Defaults:
+       - 10×7 on wide screens (66 buttons => 7 rows)
+       - 9×8 on medium screens (66 buttons => 8 rows)
+       - 6×11 on narrow screens (matches the original layout)
+  ============================================================ */
+
+  --mm-fx-btn: 34px;   /* button square size */
+  --mm-fx-gap: 6px;    /* grid gap */
+  --mm-fx-cols: 10;    /* default column count (10×7) */
+
+  /* tools panel internal box model (used to compute pane width) */
+  --mm-tools-pad: 10px;
+  --mm-tools-border: 1px;
+}
+
+/* FX grid responsiveness
+   - 10 columns on wide layouts (best vertical compactness)
+   - 9 columns on medium layouts
+   - fall back to the original 6 columns on narrow layouts
+*/
+@media (max-width: 1400px) {
+  :root { --mm-fx-cols: 9; }
+}
+@media (max-width: 1100px) {
+  :root { --mm-fx-cols: 6; }
+}
+
+/* ============================================================
+   Global base + typography
+   ============================================================ */
+
+html, body { height: 100%; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  font-family: var(--sans);
+  line-height: 1.4;
+  -webkit-text-size-adjust: 100%;
+}
+
+* { box-sizing: border-box; }
+
+a {
+  color: var(--accent);
+  text-decoration-color: rgba(76, 201, 240, 0.55);
+  text-underline-offset: 2px;
+}
+a:hover { color: var(--accent-2); }
+
+.small, .muted, .hint { color: var(--muted); }
+.faint { color: var(--faint); }
+
+/* Guardrails: keep text readable by inheriting the base color */
+button, input, select, textarea, label, p, span, div { color: inherit; }
+
+::placeholder { color: rgba(230, 237, 243, 0.45); }
+
+/* ============================================================
+   Inputs / selects / buttons
+   ============================================================ */
+
+input, select, textarea {
+  background: rgba(230, 237, 243, 0.04);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  outline: none;
+}
+
+input:focus, select:focus, textarea:focus {
+  box-shadow: var(--focus);
+  border-color: rgba(76, 201, 240, 0.45);
+}
+
+input[type="checkbox"],
+input[type="radio"],
+input[type="range"]{
+  accent-color: var(--accent);
+}
+
+button,
+.btn {
+  appearance: none;
+  background: rgba(230, 237, 243, 0.06);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, transform 80ms ease, box-shadow 120ms ease;
+}
+
+button:hover,
+.btn:hover {
+  background: rgba(230, 237, 243, 0.10);
+  border-color: rgba(230, 237, 243, 0.22);
+}
+
+button:active,
+.btn:active {
+  transform: translateY(1px);
+}
+
+button:focus-visible,
+.btn:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+}
+
+button:disabled,
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+button.primary,
+.btn-primary {
+  background: rgba(76, 201, 240, 0.18);
+  border-color: rgba(76, 201, 240, 0.40);
+}
+button.primary:hover,
+.btn-primary:hover {
+  background: rgba(76, 201, 240, 0.26);
+}
+
+button.danger,
+.btn-danger {
+  background: rgba(255, 92, 122, 0.14);
+  border-color: rgba(255, 92, 122, 0.38);
+}
+button.danger:hover,
+.btn-danger:hover {
+  background: rgba(255, 92, 122, 0.22);
+}
+
+.btn.btn-small { padding: 6px 10px; font-size: 12px; border-radius: 10px; }
+
+.icon-btn {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 12px;
+}
+
+/* ============================================================
+   App chrome (top bar, main panel container, footer)
+   ============================================================ */
+
+body.mm-app {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(11, 15, 20, 0.85);
+  backdrop-filter: blur(8px);
+}
+
+.brand { display: flex; gap: 10px; align-items: center; min-width: 240px; }
+
+.logo {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  font-size: 18px;
+}
+
+.brand .title { font-weight: 750; line-height: 1.1; letter-spacing: 0.2px; }
+.brand .subtitle { font-size: 12px; line-height: 1.2; color: var(--muted); }
+
+.top-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-strong);
+  background: rgba(18, 28, 40, 0.75);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  max-width: 50vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* MIDI connection pill states */
+.pill.midi-ok   { border-color: rgba(82, 255, 168, 0.55); background: rgba(82, 255, 168, 0.10); }
+.pill.midi-warn { border-color: rgba(251, 191, 36, 0.55); background: rgba(251, 191, 36, 0.10); }
+.pill.midi-bad  { border-color: rgba(255, 92, 122, 0.55); background: rgba(255, 92, 122, 0.10); }
+
+.app-main {
+  padding: 14px;
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+.panel.secondary, .panel-2 { background: var(--panel-2); }
+
+.panel-content { padding: 12px; }
+
+.app-footer {
+  padding: 12px 14px 18px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ============================================================
+   Modal
+   ============================================================ */
+
+.modal.hidden { display: none; }
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: grid;
+  place-items: center;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.modal-dialog {
+  position: relative;
+  width: min(740px, calc(100vw - 24px));
+  max-height: min(90vh, 820px);
+  overflow: auto;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: linear-gradient(180deg, rgba(18, 28, 40, 0.98), rgba(11, 15, 20, 0.98));
+  box-shadow: 0 30px 120px rgba(0, 0, 0, 0.6);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0.2px;
+}
+
+.modal-body { padding: 12px; }
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.field > span { color: var(--muted); }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Turbo speed slider (MIDI modal) */
+.turbo-slider {
+  flex: 1;
+  min-width: 160px;
+  max-width: 320px;
+}
+
+.code {
+  font-family: var(--mono);
+  font-size: 11px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.35);
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+details {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(230, 237, 243, 0.03);
+  padding: 10px 10px 8px;
+}
+
+details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.modal-footer {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+/* ============================================================
+   Tables / lists / code blocks
+   ============================================================ */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 8px;
+  color: var(--text);
+}
+
+th { color: var(--muted); font-weight: 650; }
+
+pre, code {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: var(--text);
+}
+
+/* ============================================================
+   Global: disable accidental text selection (except entry fields)
+   ============================================================ */
+
+body.mm-app{
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+body.mm-app input,
+body.mm-app textarea,
+body.mm-app select,
+body.mm-app [contenteditable]:not([contenteditable="false"]),
+body.mm-app .mm-allow-select{
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+/* ============================================================
+   DigiPRO panel CSS (layout + dark theme)
+   (Extracted from ui.js injected styles; colors adjusted for dark mode)
+   ============================================================ */
+
+/* Layout: top toolbar + editor */
+#digiproEditorBar { box-sizing: border-box; }
+.mm-digi-layout { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.mm-digi-topbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; }
+.mm-digi-left { display: flex; flex-direction: column; gap: 8px; }
+
+.mm-digi-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; }
+
+.mm-digi-slot {
+  border: 1px solid var(--border);
+  padding: 4px;
+  background: rgba(230, 237, 243, 0.03);
+  cursor: pointer;
+  position: relative;
+  user-select: none;
+  border-radius: 10px;
+}
+
+.mm-digi-slot:hover { border-color: rgba(76, 201, 240, 0.35); }
+
+.mm-digi-slot .nm { position: absolute; left: 4px; top: 4px; font-size: 11px; color: var(--muted); letter-spacing: 0.5px; }
+.mm-digi-slot .usr { position: absolute; right: 4px; top: 4px; font-size: 10px; color: var(--muted); }
+
+.mm-digi-slot canvas { width: 100%; height: 48px; display: block; image-rendering: pixelated; }
+
+.mm-digi-slot.active { outline: 2px solid var(--slot-active); outline-offset: -2px; }
+.mm-digi-slot.selected { box-shadow: inset 0 0 0 2px var(--slot-selected); }
+
+.mm-digi-editor-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.mm-digi-editor { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.mm-digi-editor canvas { border: 1px solid var(--border); border-radius: 10px; image-rendering: pixelated; background: rgba(0,0,0,0.20); }
+.mm-digi-editor .tools button { margin-right: 6px; }
+
+.mm-small { font-size: 12px; color: var(--muted); }
+
+.mm-digi-io { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.mm-digi-io .muted { color: var(--muted); }
+
+.mm-digi-guard {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 9999;
+}
+
+.mm-digi-guard .dlg {
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  padding: 14px;
+  min-width: 280px;
+  max-width: min(1040px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  box-sizing: border-box;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* Fixed-size Evolve dialogs: avoids modal resizing when conditional UI appears/disappears */
+.mm-digi-guard .dlg.mm-evolve-dlg {
+  width: clamp(360px, 72vw, 780px);
+  height: clamp(420px, 80vh, 860px);
+}
+
+.mm-digi-guard .dlg h4 { margin: 0 0 8px 0; font-size: 14px; }
+.mm-digi-guard .dlg button:disabled { opacity: 0.45; cursor: not-allowed; }
+.mm-digi-guard .btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+
+/* ============================================================
+   Mode picker (Blend / Morph / Evolve dialogs)
+   ============================================================ */
+
+.mm-modegroups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mm-modegroup {
+  padding-top: 8px;
+}
+
+.mm-modegroup:first-child {
+  padding-top: 0;
+}
+
+.mm-modegroup + .mm-modegroup {
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.mm-modegroup-title {
+  font-size: 11px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 8px 0;
+}
+
+.mm-modegrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+
+.mm-modegrid button {
+  height: 30px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mm-mode-active {
+  outline: 2px solid #7aa7ff;
+  outline-offset: -2px;
+}
+
+.mm-digi-pill {
+  border: 1px solid var(--border-strong);
+  background: rgba(230, 237, 243, 0.06);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.mm-digi-badge { position: absolute; right: 4px; bottom: 4px; font-size: 10px; color: var(--muted); }
+
+.mm-kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(230, 237, 243, 0.06);
+  color: var(--text);
+}
+
+.mm-digi-help { margin-left: auto; }
+.mm-muted { color: var(--muted); }
+
+/* Piano / slot pads */
+.mm-piano-wrap { width: 100%; overflow: hidden; }
+.mm-kb-wrap {
+  width: 100%;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.mm-kb-toggle {
+  flex: 0 0 46px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  box-sizing: border-box;
+  border-right: 1px solid var(--border);
+  background: rgba(18, 28, 40, 0.55);
+}
+
+.mm-kb-toggle button { height: 26px; padding: 0 6px; font-size: 11px; line-height: 1; }
+.mm-kb-toggle button.active { outline: 2px solid var(--slot-active); outline-offset: -2px; }
+
+.mm-kb-view { flex: 1 1 auto; overflow-x: auto; overflow-y: hidden; }
+.mm-piano, .mm-slotpads { display: block; height: 72px; touch-action: none; border: none; }
+.mm-slotpads { width: 100%; }
+
+/* Tools layout update (left-side effects panel) */
+.mm-tools-wrap { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; }
+.mm-history-row { display: flex; gap: 8px; align-items: center; }
+.mm-history-row button { width: 100%; }
+.mm-fx-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--mm-fx-cols), var(--mm-fx-btn));
+  grid-auto-rows: var(--mm-fx-btn);
+  gap: var(--mm-fx-gap);
+  align-content: start;
+}
+.mm-fx-grid button {
+  width: var(--mm-fx-btn);
+  height: var(--mm-fx-btn);
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+}
+.mm-fx-grid button:disabled { opacity: 0.35; }
+.mm-tools-bottom { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.mm-tools-bottom > button { width: auto; }
+.mm-mutate-row button { flex: 0 0 auto; }
+.mm-mutate-row { display: flex; gap: 8px; align-items: center; }
+.mm-mutate-row input[type="range"] { flex: 1 1 auto; }
+.mm-mutate-row .mm-mutate-val { width: 54px; text-align: right; font-size: 12px; color: var(--muted); }
+
+/* Filled slot state (wave present) */
+.mm-digi-slot.filled-slot { background: rgba(82, 255, 168, 0.06); }
+
+/* DigiPRO slot progress states (request-all) */
+.mm-digi-slot.processing-slot { outline: 2px dashed var(--slot-active); }
+.mm-digi-slot.processed-slot  { box-shadow: inset 0 0 0 2px rgba(82, 255, 168, 0.75); }
+.mm-digi-slot.failed-slot     { box-shadow: inset 0 0 0 2px rgba(255, 92, 122, 0.75); }
+.mm-digi-slot.processing-slot::after { content: 'REQ'; position: absolute; right: 4px; bottom: 4px; font-size: 10px; color: var(--muted); }
+.mm-digi-slot.processed-slot::after  { content: 'OK'; position: absolute; right: 4px; bottom: 4px; font-size: 10px; color: var(--muted); }
+.mm-digi-slot.failed-slot::after     { content: 'ERR'; position: absolute; right: 4px; bottom: 4px; font-size: 10px; color: var(--muted); }
+
+/* DigiPRO slot progress states (upload) */
+.mm-digi-slot.sending-slot { outline: 2px dashed rgba(251, 191, 36, 0.95); }
+.mm-digi-slot.sent-slot    { box-shadow: inset 0 0 0 2px rgba(82, 255, 168, 0.75); }
+.mm-digi-slot.send-failed-slot { box-shadow: inset 0 0 0 2px rgba(255, 92, 122, 0.75); }
+.mm-digi-slot.sending-slot::after { content: 'SND'; position: absolute; right: 4px; bottom: 4px; font-size: 10px; color: var(--muted); }
+.mm-digi-slot.sent-slot::after    { content: 'SENT'; position: absolute; right: 4px; bottom: 4px; font-size: 10px; color: var(--muted); }
+.mm-digi-slot.send-failed-slot::after { content: 'FAIL'; position: absolute; right: 4px; bottom: 4px; font-size: 10px; color: var(--muted); }
+
+/* HOT (per-wave _dpHeat > 1) indicator */
+.mm-digi-slot.hot-slot::before {
+  content: '🔥';
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.95;
+  pointer-events: none;
+  z-index: 6;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.45);
+}
+
+/* Editor badge */
+.mm-heat-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.95;
+}
+
+/* ------------------------------
+   DigiPRO UI layout v2
+   (left stacked controls + wave+keys, right FX panel spanning both)
+------------------------------ */
+
+.mm-digi-shell { display: flex; flex-direction: column; gap: 0; }
+
+/* Top area: left stack + right tools panel */
+.mm-digi-toprow {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+  box-sizing: border-box;
+}
+
+.mm-digi-leftcol {
+  flex: 1 1 auto;
+  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* Left: Controls panel */
+.mm-digi-controls {
+  background: rgba(15, 22, 32, 0.70);
+  border: 1px solid var(--border);
+  padding: 10px;
+  box-sizing: border-box;
+  border-radius: 12px 12px 0 0;
+}
+
+.mm-digi-controls .mm-digi-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.mm-digi-controls .mm-digi-row + .mm-digi-row { margin-top: 6px; }
+
+/* Slot label + name input inline */
+.mm-digi-controls .mm-digi-editor-bar { margin: 0; display: flex; gap: 6px; align-items: center; }
+.mm-digi-controls .mm-digi-editor-bar .mm-small { font-size: 12px; }
+
+/* Slightly tighter controls */
+.mm-digi-controls button,
+.mm-digi-controls input,
+.mm-digi-controls select { font-size: 12px; }
+
+/* I/O row: cleaner sizing */
+.mm-digi-controls .mm-digi-io {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: stretch;
+  width: 100%;
+}
+
+.mm-digi-controls .mm-digi-io > button {
+  flex: 1 1 150px;
+  height: 28px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.mm-digi-controls button { height: 28px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; line-height: 1; white-space: nowrap; }
+.mm-digi-controls input[type="text"],
+.mm-digi-controls select { height: 28px; padding: 0 10px; }
+
+/* Left: Waveform + keyboard */
+.mm-digi-wavekeys {
+  border: 1px solid var(--border);
+  border-top: none; /* join with controls */
+  background: rgba(15, 22, 32, 0.55);
+  padding: 0;
+  box-sizing: border-box;
+  border-radius: 0 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.mm-digi-wavekeys .mm-digi-editor {
+  width: 100%;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.mm-digi-wavekeys .mm-digi-editor canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  box-sizing: border-box;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: translateY(8px) scale(0.992);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+  will-change: opacity, transform;
+}
+
+.mm-digi-wavekeys .mm-digi-editor canvas.mm-view-active {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.mm-digi-wavekeys .mm-digi-editor .mm-wavetable-view {
+  background: radial-gradient(circle at 20% 15%, rgba(54, 140, 108, 0.16), rgba(3, 9, 7, 0.0) 42%);
+}
+
+.mm-digi-wavekeys .mm-digi-editor .mm-wavetable-tune-overlay {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+
+.mm-digi-wavekeys .mm-digi-editor .mm-wavetable-view.mm-view-active ~ .mm-wavetable-tune-overlay {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.mm-wavetable-tune-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.mm-wavetable-tune-row,
+.mm-wavetable-tune-row button,
+.mm-wavetable-tune-row input {
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  color: rgba(190, 255, 225, 0.92);
+  text-shadow: 0 0 8px rgba(8, 22, 16, 0.8);
+}
+
+.mm-wavetable-tune-unit {
+  color: rgba(190, 255, 225, 0.92);
+}
+
+.mm-wavetable-tune-row button {
+  min-width: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  border: none;
+  background: none;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.mm-wavetable-tune-row button:hover,
+.mm-wavetable-tune-row button:focus-visible,
+.mm-wavetable-tune-row .mm-wavetable-tune-input:hover,
+.mm-wavetable-tune-row .mm-wavetable-tune-input:focus {
+  color: #d8fff0;
+  outline: none;
+}
+
+.mm-wavetable-tune-row .mm-wavetable-tune-input {
+  width: 3ch;
+  padding: 0;
+  text-align: center;
+  border: none;
+  background: none;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.mm-wavetable-tune-row .mm-wavetable-tune-input::-webkit-outer-spin-button,
+.mm-wavetable-tune-row .mm-wavetable-tune-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.mm-wavetable-tune-row button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Keyboard / pad strip stays fixed */
+.mm-digi-wavekeys .mm-piano-wrap { margin: 0; padding: 0; flex: 0 0 auto; border-top: none; }
+.mm-digi-wavekeys .mm-piano,
+.mm-digi-wavekeys .mm-slotpads { height: 86px; display: block; box-sizing: border-box; }
+
+/* Right: tools panel spans controls + wave + keys height */
+.mm-digi-rightpane {
+  /*
+    Width is derived from the FX grid so the special buttons never wrap.
+    This is the key to getting 9×8 (or 10×7) while keeping buttons the same size.
+  */
+  --mm-rightpane-w: calc(
+    (var(--mm-fx-cols) * var(--mm-fx-btn)) +
+    ((var(--mm-fx-cols) - 1) * var(--mm-fx-gap)) +
+    (var(--mm-tools-pad) * 2) +
+    (var(--mm-tools-border) * 2)
+  );
+
+  flex: 0 0 var(--mm-rightpane-w);
+  width: var(--mm-rightpane-w);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.mm-digi-rightpane .mm-tools-wrap {
+  width: 100%;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 10px;
+  align-items: stretch;
+  background: rgba(15, 22, 32, 0.70);
+  border: var(--mm-tools-border) solid var(--border);
+  padding: var(--mm-tools-pad);
+  box-sizing: border-box;
+  border-radius: 12px;
+}
+
+.mm-tools-status {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.mm-tools-status .mm-io-msg {
+  /* Space reservation */
+  --mm-io-lines: 2;
+  --mm-io-lh: 1.25;
+
+  flex: 1 1 auto;
+  font-size: 12px;
+  line-height: var(--mm-io-lh);
+  color: var(--muted);
+
+  /* Reserve height for up to N wrapped lines */
+  min-height: calc(var(--mm-io-lines) * var(--mm-io-lh) * 1em);
+
+  /* Safety: never let an unexpectedly long string reflow the whole panel */
+  max-height: calc(var(--mm-io-lines) * var(--mm-io-lh) * 1em);
+  overflow: hidden;
+
+  /* Wrap long tokens (device strings, errors, etc) */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Override earlier width:100% on history buttons; keep them side-by-side */
+.mm-digi-rightpane .mm-history-row { display: flex; gap: 8px; align-items: center; }
+.mm-digi-rightpane .mm-history-row button { width: auto; flex: 1 1 0; }
+
+/* Preferred bottom tools layout (right panel) */
+.mm-dp-row { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
+.mm-dp-row input[type="range"] { flex: 1 1 auto; min-width: 120px; }
+.mm-dp-row.mm-dp-two button { flex: 1 1 0; }
+.mm-dp-row.mm-dp-btnslider button { flex: 0 0 auto; }
+
+/* Amplitude row: keep on ONE row */
+.mm-dp-norm-row { flex-wrap: nowrap; }
+.mm-dp-norm-row input[type="range"] { flex: 1 1 0; min-width: 60px; }
+.mm-dp-norm-row label { flex: 0 0 auto; white-space: nowrap; }
+
+/* Range slider wrapper with end/mid labels (used by AMP Gain Trim dB slider) */
+.mm-rangewrap {
+  flex: 1 1 0;
+  min-width: 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mm-dp-norm-row .mm-rangewrap input[type="range"] {
+  flex: 0 0 auto;
+  width: 100%;
+}
+.mm-range-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  user-select: none;
+  pointer-events: none;
+}
+.mm-range-labels span { white-space: nowrap; }
+
+.mm-dp-row.mm-dp-save-row .mm-digi-editor-bar {
+  margin: 0;
+  flex: 1 1 auto;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+.mm-dp-row.mm-dp-save-row .mm-digi-editor-bar input {
+  width: 90px;
+  text-align: center;
+}
+.mm-dp-row.mm-dp-save-row button { flex: 0 0 auto; }
+.mm-dp-save-small { font-size: 12px; padding: 0 8px; }
+
+/* Make keyboard sit tight to slot grid */
+#digiproEditorBar { margin: 0; padding: 0; }
+#digiproGrid { margin-top: 0 !important; }
+
+/* Make the DigiPRO panel responsive inside our container */
+body.mm-app #digiproGrid { margin-top: 12px; }
+
+/* Drag/drop target outlines */
+.mm-digi-slot.drop-target {
+  outline: 2px solid rgba(230, 237, 243, 0.90);
+  outline-offset: -2px;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.25) inset;
+  border-radius: 10px;
+}
+
+.mm-digi-slot.drop-target.bad-target { outline-color: rgba(255, 92, 122, 0.95); }
+
+/* Slot corner labels (name + slot number) — ensure readable contrast */
+body.mm-app .mm-digi-slot .nm,
+body.mm-app .mm-digi-slot .meta {
+  position: absolute;
+  top: 4px;
+  z-index: 5;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  line-height: 1.1;
+  letter-spacing: 0.4px;
+  font-weight: 650;
+  color: rgba(230, 237, 243, 0.92);
+  background: rgba(11, 15, 20, 0.65);
+  border: 1px solid rgba(230, 237, 243, 0.16);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  pointer-events: auto;
+}
+
+body.mm-app .mm-digi-slot .nm {
+  left: auto;
+  right: 4px;
+  max-width: calc(100% - 64px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+body.mm-app .mm-digi-slot .meta {
+  right: auto;
+  left: 4px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* Override runtime-injected absolute positioning on .usr */
+body.mm-app .mm-digi-slot .meta .usr,
+body.mm-app .mm-digi-slot .meta .idx {
+  position: static;
+  right: auto;
+  top: auto;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  line-height: 1.1;
+}
+
+body.mm-app .mm-digi-slot .meta .idx {
+  opacity: 0.92;
+  font-variant-numeric: tabular-nums;
+}
+
+body.mm-app .mm-digi-slot .meta .usr {
+  opacity: 0.90;
+  font-weight: 750;
+}
+
+/* Clean grid mode: hide slot corner labels unless hovered (hover-capable pointer devices) */
+@media (hover: hover) and (pointer: fine) {
+  body.mm-app .mm-digi-slot .nm,
+  body.mm-app .mm-digi-slot .meta {
+    opacity: 0;
+    transform: translateY(-2px);
+    transition: opacity 160ms ease, transform 160ms ease;
+    pointer-events: none;
+    will-change: opacity, transform;
+  }
+
+  body.mm-app .mm-digi-slot:hover .nm,
+  body.mm-app .mm-digi-slot:hover .meta,
+  body.mm-app .mm-digi-slot:focus-visible .nm,
+  body.mm-app .mm-digi-slot:focus-visible .meta {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.mm-app .mm-digi-slot .nm,
+  body.mm-app .mm-digi-slot .meta {
+    transition: none !important;
+    transform: none !important;
+  }
+}
+
+/* Selected slot (used by newer UI code) */
+body.mm-app .mm-digi-slot.selected-slot { box-shadow: inset 0 0 0 2px rgba(76, 201, 240, 0.75) !important; }
+
+/* Keyboard focus visibility on slots */
+.mm-digi-slot:focus-visible {
+  outline: 2px solid rgba(76, 201, 240, 0.95);
+  outline-offset: -2px;
+}

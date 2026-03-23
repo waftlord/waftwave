@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>Waft Wave</title>
+  <link rel="stylesheet" href="assets/css/main.css">
+</head>
+<body class="mm-app">
+
+  <header class="app-topbar">
+    <div class="brand">
+      <button class="logo icon-btn" id="aboutBtn" type="button" aria-label="About Waft Wave">📉</button>
+      <div>
+        <div class="title">Waft Wave</div>
+        <div class="subtitle">Monomachine mk2 DigiPRO waveform import/export &amp; single cycle laboratory</div>
+      </div>
+    </div>
+
+    <div class="top-actions">
+      <button class="btn" id="openMidiModalBtn" type="button">MIDI I/O</button>
+      <span class="pill midi-warn" id="midiStatusPill" title="MIDI status">MIDI: disabled</span>
+      <span class="pill" id="turboTopPill" title="Turbo speed">Turbo: x1.00</span>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <section class="panel" data-panel-id="digipro">
+      <div class="panel-content"></div>
+    </section>
+  </main>
+
+  <div class="app-footer"></div>
+
+  <!-- MIDI Modal -->
+  <div id="midiModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="midiModalTitle">
+    <div class="modal-backdrop" data-close-modal></div>
+
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="midiModalTitle">MIDI ports &amp; Turbo</h2>
+        <button class="icon-btn" type="button" data-close-modal aria-label="Close">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-grid">
+          <label class="field">
+            <span>MIDI input</span>
+            <select id="midiInSelect"></select>
+          </label>
+
+          <label class="field">
+            <span>MIDI output</span>
+            <select id="midiOutSelect"></select>
+          </label>
+
+          <div class="field">
+            <span>Turbo</span>
+            <div class="row">
+              <button id="turboButton" type="button" class="btn btn-small">Turbo</button>
+              <!-- Turbo speed slider: values 1..8 map to x1.0..x10 -->
+              <input
+                id="turboSpeedSlider"
+                class="turbo-slider"
+                type="range"
+                min="1"
+                max="8"
+                step="1"
+                value="1"
+                list="turboSpeedTicks"
+                aria-label="Turbo speed"
+              />
+              <datalist id="turboSpeedTicks">
+                <option value="1" label="x1.0"></option>
+                <option value="2" label="x2.0"></option>
+                <option value="3" label="x3.3"></option>
+                <option value="4" label="x4.0"></option>
+                <option value="5" label="x5.0"></option>
+                <option value="6" label="x6.7"></option>
+                <option value="7" label="x8.0"></option>
+                <option value="8" label="x10"></option>
+              </datalist>
+
+              <span id="turboSpeedLabel" class="pill">x1.0</span>
+            </div>
+          </div>
+
+          <div class="field" style="grid-column: 1 / -1;">
+            <span id="turboStatusLine" class="muted">Turbo: x1.00 (not detected)</span>
+          </div>
+
+          <div class="field" style="grid-column: 1 / -1;">
+            <span>Inter-slot processing gap</span>
+            <div class="row">
+              <label class="row" style="gap:6px; align-items:center;">
+                <input id="dpInterSlotDelayEnable" type="checkbox" />
+                <span>Fixed</span>
+              </label>
+
+              <input
+                id="dpInterSlotDelaySlider"
+                class="turbo-slider"
+                type="range"
+                min="0"
+                max="2000"
+                step="10"
+                value="200"
+                disabled
+                aria-label="Inter-slot delay (ms)"
+              />
+              <span id="dpInterSlotDelayLabel" class="pill">Auto</span>
+            </div>
+            <div class="small muted" style="margin-top:6px;">
+              Extra pause between full DigiPRO slot dumps (Upload/Download ALL/Selected). Increase if some notes sound corrupted after upload.
+            </div>
+          </div>
+        </div>
+
+        <details>
+          <summary>Advanced options</summary>
+          <div style="margin-top:10px;" class="field">
+            <span>SysEx request header preview</span>
+            <div class="code" id="sysexHeaderPreview">F0 00 20 3C 03 00 … F7</div>
+            <div id="sysexDeviceLearnedLine" class="muted" style="margin-top:6px;">SysEx Device ID: default (0 / 0x00)</div>
+          </div>
+        </details>
+
+        <div class="modal-footer">
+          <button id="enableMidiBtn" type="button" class="btn">Enable WebMIDI</button>
+          <button id="refreshPortsBtn" type="button" class="btn">Refresh ports</button>
+          <button id="testRequestBtn" type="button" class="btn btn-primary">Test: Request Slot 1</button>
+        </div>
+
+        <div class="small muted" style="margin-top:10px;">
+          To receive DigiPro data from Monomachine highlight slot(s) and Download Slot/Selected or Download ALL. <br>
+          To upload DigiPro Waves on Monomachine:DIGIPRO MGR → RECEIVE (ORIG) and Upload Slot/Selected/All.<br>
+          For best results at Turbo speed: <strong>CONTROL OUT2 = TRANSPORT: OFF & MIDI CLOCK: OFF</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- About / Info Modal -->
+  <div id="aboutModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="aboutModalTitle">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="aboutModalTitle">About Waft Wave</h2>
+        <button class="icon-btn" type="button" data-close-modal aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin-top:0;">
+          Waft Wave is a browser-based toolkit for Elektron Monomachine mk2 DigiPRO waveforms: build, audition, import/export, and send/receive over MIDI SysEx.
+        </p>
+        <p style="margin-top:0;">
+          It also sends Machinedrum SDS and can export WAV files for your sampler.
+        </p>
+        <p style="margin-top:0;">
+          Thanks to JohnnyW for testing and steer towards the wave chain engines.
+        </p>
+        <p style="margin-top:0;">
+          Created by WaftSoft.
+        </p>
+        <div class="small muted" style="margin:10px 0 0;">
+          License: <strong>Apache License 2.0</strong>
+        </div>
+        <ul class="small" style="margin:10px 0 0; padding-left: 18px;">
+          <li>No affiliation with Elektron; trademarks belong to their owners.</li>
+        </ul>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" type="button" data-close-modal>Nice 👍</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts (no modules, no bundlers). Order is mandatory. -->
+  <script defer src="assets/js/boot.js"></script>
+  <script defer src="assets/js/digipro-sysex.js"></script>
+  <script defer src="assets/js/midi.js"></script>
+  <script defer src="assets/js/md-uw-wavemode.js"></script>
+  <script defer src="assets/js/special-functions.js"></script>
+  <script defer src="assets/js/undo-redo.js"></script>
+  <script defer src="assets/js/import-export.js"></script>
+  <script defer src="assets/js/ui-core.js"></script>
+  <script defer src="assets/js/ui-tables.js"></script>
+  <script defer src="assets/js/ui-audio.js"></script>
+  <script defer src="assets/js/ui-editor.js"></script>
+  <script defer src="assets/js/ui-effects-tools.js"></script>
+  <script defer src="assets/js/ui-grid.js"></script>
+  <script defer src="assets/js/ui-midi.js"></script>
+  <script defer src="assets/js/ui-init.js"></script>
+  <script defer src="assets/js/ui-midi-modal.js"></script>
+  <script defer src="assets/js/ui-about-modal.js"></script>
+</body>
+</html>

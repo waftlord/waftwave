@@ -77,9 +77,3 @@ This tool can send SysEx to hardware. You are responsible for:
 ## License
 
 Licensed under the **Apache License 2.0**. See `LICENSE`.
-
-## Before sharing publicly
-
-- Replace the placeholder copyright owner in `NOTICE`.
-- Run `node scripts/e2e-sim-check.mjs`.
-- Test once in a Chromium-based browser with your expected MIDI routing.

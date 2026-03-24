@@ -1,5 +1,7 @@
 # Waft Wave
 
+https://wftlrd.uk/waftwave
+
 **Monomachine mk2 DigiPRO waveform import/export & single‑cycle laboratory.**
 
 Waft Wave is a **static, client‑side web app** (HTML + vanilla JS) for editing and transferring **Elektron Monomachine DigiPRO** single‑cycle waveforms over **MIDI SysEx** (C6‑style **0x5D** dumps / **0x5E** requests).

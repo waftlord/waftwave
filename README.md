@@ -6,7 +6,7 @@ https://wftlrd.uk/waftwave
 
 Waft Wave is a **static, client‑side web app** (HTML + vanilla JS) for editing and transferring **Elektron Monomachine DigiPRO** single‑cycle waveforms over **MIDI SysEx** (C6‑style **0x5D** dumps / **0x5E** requests).
 
-It also includes optional tooling for **Machinedrum UW** wave sending (see `assets/js/md-uw-wavemode.js`).
+It also includes optional tooling for **Machinedrum UW** wave sending (see `assets/js/md-uw-wavemode.js`) and optional export for **Tonverk** wavetables.
 
 > **Not affiliated with or endorsed by Elektron.**  
 > “Elektron”, “Monomachine”, and “Machinedrum” are trademarks of Elektron Music Machines.

@@ -3280,10 +3280,11 @@ function randomName4(used){
     //       (B) Periodic Fourier resample (FFT-style) keeping sample rate fixed
     // --------------------------------------------------------------
 
-    const EXPORT_WAV_PREF_KEY = 'mm_export_wav_prefs_v5';
+    const EXPORT_WAV_PREF_KEY = 'mm_export_wav_prefs_v6';
     // Contextual preference for *bank* WAV exports only.
     // Kept separate from EXPORT_WAV_PREF_KEY so non-bank export dialogs don't overwrite it.
     const EXPORT_WAV_BANK_SCOPE_KEY = 'mm_export_wav_bank_scope_v1';
+    const TONVERK_WAVE_SIZE = 2048;
 
     // Tuned-note export guard: very high notes can collapse to a tiny
     // samples-per-cycle (e.g. ~6–12 at 44.1k/48k), which sounds rough/steppy
@@ -3305,11 +3306,12 @@ function randomName4(used){
       }
 
       const out = {
-        v: 5,
+        v: 6,
         adv: !!p.adv,
         baseSampleRate: _clampInt(p.baseSampleRate == null ? 44100 : p.baseSampleRate, 4000, 96000),
         pitchOctaves: (p.pitchOctaves|0), // 0, -1, -2
         pitchMethod: (p.pitchMethod === 'fft') ? 'fft' : 'sr',
+        tonverkMode: !!p.tonverkMode,
 
         // Tuned note export (Advanced only)
         tuneEnabled: !!p.tuneEnabled,
@@ -3339,6 +3341,18 @@ function randomName4(used){
         out.pitchMethod = 'sr';
         out.tuneEnabled = false;
       }
+      if (out.tonverkMode){
+        // Tonverk needs a packed/chain-style wavetable with a power-of-two frame size.
+        // Keep this mode "one switch" simple and make the export backend do the rest.
+        out.baseSampleRate = 44100;
+        out.pitchOctaves = 0;
+        out.pitchMethod = 'fft';
+        out.tuneEnabled = false;
+        out.exportSingles = false;
+        out.exportChain = true;
+        out.palindromeChain = false;
+        out.loopChain = false;
+      }
       return out;
     }
 
@@ -3346,8 +3360,10 @@ function randomName4(used){
       try{
         // v3 introduced tuned note export + palindrome chain options.
         // v4 added bank export “what to include” toggles.
+        // v6 adds Tonverk wavetable export mode.
         // Fall back to older preference keys so existing users don't lose their export defaults.
         const raw = localStorage.getItem(EXPORT_WAV_PREF_KEY)
+          || localStorage.getItem('mm_export_wav_prefs_v5')
           || localStorage.getItem('mm_export_wav_prefs_v4')
           || localStorage.getItem('mm_export_wav_prefs_v3')
           || localStorage.getItem('mm_export_wav_prefs_v2');
@@ -3402,6 +3418,87 @@ function randomName4(used){
       return Math.pow(2, n);
     }
 
+    function dpTonverkFilenameSuffix(prefs){
+      const p = dpNormExportWavPrefs(prefs);
+      return p.tonverkMode ? `_wt${TONVERK_WAVE_SIZE}` : '';
+    }
+
+    function dpFinalizeExportWavFilename(baseName, extraSuffix, prefs){
+      const stem = String(baseName || 'export.wav');
+      const add = `${String(extraSuffix || '')}${dpTonverkFilenameSuffix(prefs)}`;
+      if (/\.wav$/i.test(stem)) return stem.replace(/\.wav$/i, `${add}.wav`);
+      return `${stem}${add}.wav`;
+    }
+
+    function dpTonverkChainBaseName(infos, fallback){
+      const list = Array.isArray(infos) ? infos : [];
+      for (const inf of list){
+        if (!inf) continue;
+        const raw = String((inf.nameStem != null) ? inf.nameStem : (inf.nm4 || '')).trim();
+        if (!raw) continue;
+        if (raw.toUpperCase() === 'EMPT') continue;
+        return dpSafeStem(raw);
+      }
+      return dpSafeStem(fallback || 'wavetable');
+    }
+
+    function dpResampleFloatCycleAA(srcF, targetLen, taps=16){
+      const src = (srcF instanceof Float32Array || srcF instanceof Float64Array) ? srcF : new Float32Array(srcF||[]);
+      const N = src.length|0;
+      const M = targetLen|0;
+      const out = new Float32Array(M > 0 ? M : 0);
+      if (!N || !M) return out;
+      taps = Math.max(1, taps|0);
+      const step = N / M;
+      for (let i=0;i<M;i++){
+        let acc = 0;
+        for (let t=0;t<taps;t++){
+          const x = (i + (t + 0.5)/taps) * step;
+          const xi = Math.floor(x);
+          const i0 = ((xi % N) + N) % N;
+          const i1 = (i0 + 1) % N;
+          const frac = x - xi;
+          acc += src[i0]*(1-frac) + src[i1]*frac;
+        }
+        out[i] = acc / taps;
+      }
+      return out;
+    }
+
+    function dpBestTonverkExportSourceFloat(info, targetLen){
+      const fallback = u8ToCycleFloat((info && info.dataU8) ? info.dataU8 : new Uint8Array(96).fill(128));
+      const target = Math.max(64, targetLen|0);
+      let src = null;
+
+      try{
+        if (info && info.srcFloat && info.srcFloat.length){
+          src = (info.srcFloat instanceof Float32Array) ? info.srcFloat : new Float32Array(info.srcFloat);
+        }
+      }catch(_){ src = null; }
+
+      try{
+        if (!src && info && info.tables6132 && typeof dpBaseWaveInt16FromTables === 'function'){
+          const baseI16 = dpBaseWaveInt16FromTables(info.tables6132);
+          if (baseI16 && baseI16.length){
+            src = new Float32Array(baseI16.length);
+            for (let i=0;i<baseI16.length;i++){
+              let v = (baseI16[i] || 0) / 32767;
+              if (!isFinite(v)) v = 0;
+              if (v < -1) v = -1;
+              else if (v > 1) v = 1;
+              src[i] = v;
+            }
+          }
+        }
+      }catch(_){ src = null; }
+
+      if (!src || !src.length) return fallback;
+      if ((src.length|0) > target){
+        return dpResampleFloatCycleAA(src, target, 16);
+      }
+      return (src instanceof Float32Array) ? new Float32Array(src) : new Float32Array(src);
+    }
+
     // --- Tuning helpers (simple + predictable) ---
     // Natural notes only (A..G), octave 0..6, A4=440 Hz.
     function dpSemitoneForNaturalNote(note){
@@ -3436,6 +3533,27 @@ function randomName4(used){
     function dpComputePitchParams(basePPC, prefs){
       basePPC = _clampInt(basePPC == null ? 96 : basePPC, 1, 1<<20);
       const p = dpNormExportWavPrefs(prefs);
+
+      if (p.tonverkMode){
+        return {
+          adv: !!p.adv,
+          tonverkMode: true,
+          pitchMethod: 'fft',
+          pitchOctaves: 0,
+          sampleRate: 44100,
+          pointsPerCycle: TONVERK_WAVE_SIZE,
+          baseSampleRate: 44100,
+          basePointsPerCycle: basePPC,
+
+          tuneEnabled: false,
+          tuneNote: null,
+          tuneOctave: null,
+          tuneMidi: null,
+          tuneHz: null,
+          tuneCents: 0,
+          tuneLabel: '',
+        };
+      }
 
       // SAFE defaults
       let srOut = 44100;
@@ -3620,6 +3738,7 @@ function randomName4(used){
         let chkChain = null;
         let chkPal = null;
         let chkLoop = null;
+        let chkTonverk = null;
         let txtSingles = null;
         let txtPal = null;
         let txtLoop = null;
@@ -3699,6 +3818,25 @@ function randomName4(used){
 
           dlBox.append(rowSingles, rowChain, rowPal, rowLoop);
         }
+
+        const tonverkBox = el('div');
+        tonverkBox.style.marginTop = allowPalindromeChain ? '10px' : '8px';
+        tonverkBox.style.paddingTop = '8px';
+        tonverkBox.style.borderTop = '1px solid rgba(255,255,255,0.15)';
+
+        chkTonverk = el('input');
+        chkTonverk.type = 'checkbox';
+        chkTonverk.checked = !!initial.tonverkMode;
+
+        const rowTonverk = el('label');
+        rowTonverk.className = 'mm-small';
+        rowTonverk.style.display = 'flex';
+        rowTonverk.style.alignItems = 'center';
+        rowTonverk.style.gap = '8px';
+        rowTonverk.title = 'Writes a Tonverk-friendly packed-chain WAV automatically: 2048 samples per wave, a filename ending in _wt2048.wav, and no separate single-cycle exports.';
+        rowTonverk.append(chkTonverk, document.createTextNode('Tonverk wavetable mode'));
+
+        tonverkBox.append(rowTonverk);
 
         // Advanced toggle
         const chkAdv = el('input');
@@ -3835,22 +3973,37 @@ function randomName4(used){
 
         function updateEnabled(){
           const on = !!chkAdv.checked;
+          const tonverkOn = !!(chkTonverk && chkTonverk.checked);
           // Hide the full pitch UI unless enabled (less overwhelming for most users).
           advBox.style.display = on ? '' : 'none';
-          for (const node of advBox.querySelectorAll('input,select')) node.disabled = !on;
+          for (const node of advBox.querySelectorAll('input,select')) node.disabled = !on || tonverkOn;
           // But keep the radio checked states readable when disabled.
           // If tuning is enabled, force FFT mode and disable octave/method controls to avoid confusion.
-          const tuneOn = on && !!chkTune.checked;
-          selOct.disabled = !on || tuneOn;
-          rSr.disabled = !on || tuneOn;
-          rFft.disabled = !on || tuneOn;
+          const tuneOn = on && !tonverkOn && !!chkTune.checked;
+          selSR.disabled = !on || tonverkOn;
+          chkTune.disabled = !on || tonverkOn;
+          selTuneNote.disabled = !on || tonverkOn || !chkTune.checked;
+          selTuneOct.disabled = !on || tonverkOn || !chkTune.checked;
+          selOct.disabled = !on || tonverkOn || tuneOn;
+          rSr.disabled = !on || tonverkOn || tuneOn;
+          rFft.disabled = !on || tonverkOn || tuneOn;
           if (tuneOn){
             rFft.checked = true;
           }
 
           // Bank export selections (optional)
-          const expSingles = chkSingles ? !!chkSingles.checked : true;
-          const expChain = chkChain ? !!chkChain.checked : true;
+          let expSingles = chkSingles ? !!chkSingles.checked : true;
+          let expChain = chkChain ? !!chkChain.checked : true;
+          if (chkSingles){
+            if (tonverkOn) chkSingles.checked = false;
+            chkSingles.disabled = tonverkOn;
+            expSingles = !!chkSingles.checked;
+          }
+          if (chkChain){
+            if (tonverkOn) chkChain.checked = true;
+            chkChain.disabled = tonverkOn;
+            expChain = !!chkChain.checked;
+          }
 
           // If slot-scope is enabled, update the visible counts so users can
           // see how many WAVs/slices will be produced.
@@ -3858,25 +4011,29 @@ function randomName4(used){
           if (txtSingles){
             txtSingles.textContent = `Single-cycle WAVs (${scopeN} file${scopeN===1?'':'s'})`;
           }
-          const palOn = chkPal ? !!chkPal.checked : false;
-          const loopOn = (chkLoop && palOn) ? !!chkLoop.checked : false;
+          let palOn = chkPal ? !!chkPal.checked : false;
+          if (chkPal){
+            if (tonverkOn) chkPal.checked = false;
+            chkPal.disabled = tonverkOn || !expChain;
+            palOn = !!chkPal.checked;
+          }
+          let loopOn = (chkLoop && palOn) ? !!chkLoop.checked : false;
           if (txtPal){
             const palN = (scopeN > 1) ? (loopOn ? (2*scopeN - 2) : (2*scopeN - 1)) : scopeN;
             txtPal.textContent = `Palindromic ping-pong order (${palN} slices)`;
           }
-          if (chkPal){
-            chkPal.disabled = !expChain;
-          }
           if (chkLoop){
-            chkLoop.disabled = !expChain || !palOn;
+            if (tonverkOn) chkLoop.checked = false;
+            chkLoop.disabled = tonverkOn || !expChain || !palOn;
             if (!expChain || !palOn) chkLoop.checked = false;
+            loopOn = (chkLoop && palOn) ? !!chkLoop.checked : false;
           }
-
           const prefsNow = dpNormExportWavPrefs({
             adv: on,
             baseSampleRate: parseInt(selSR.value,10),
             pitchOctaves: parseInt(selOct.value,10),
             pitchMethod: rFft.checked ? 'fft' : 'sr',
+            tonverkMode: tonverkOn,
             tuneEnabled: !!chkTune.checked,
             tuneNote: selTuneNote.value,
             tuneOctave: parseInt(selTuneOct.value,10),
@@ -3886,10 +4043,11 @@ function randomName4(used){
             exportChain: expChain,
           });
           const pp = dpComputePitchParams(basePPC, prefsNow);
-          const f0 = (pp.pointsPerCycle > 0) ? (pp.sampleRate / pp.pointsPerCycle) : 0;
 
           // Minimal, useful summary line
-          if (pp.tuneEnabled){
+          if (pp.tonverkMode){
+            preview.textContent = `Tonverk: ${pp.pointsPerCycle} samples/wave • filename _wt${pp.pointsPerCycle}.wav`;
+          } else if (pp.tuneEnabled){
             const cents = (typeof pp.tuneCents === 'number' && isFinite(pp.tuneCents)) ? pp.tuneCents : 0;
             preview.textContent = `Output: ${pp.sampleRate.toLocaleString()} Hz • ${pp.pointsPerCycle} samples/cycle • ${pp.tuneLabel} (${(cents>=0?'+':'') + cents.toFixed(2)}¢)`;
           } else {
@@ -3914,6 +4072,7 @@ function randomName4(used){
         selOct.oninput = updateEnabled;
         rSr.oninput = updateEnabled;
         rFft.oninput = updateEnabled;
+        if (chkTonverk) chkTonverk.oninput = updateEnabled;
         chkTune.oninput = updateEnabled;
         selTuneNote.oninput = updateEnabled;
         selTuneOct.oninput = updateEnabled;
@@ -3984,6 +4143,7 @@ function randomName4(used){
                 baseSampleRate: parseInt(selSR.value,10),
                 pitchOctaves: parseInt(selOct.value,10),
                 pitchMethod: rFft.checked ? 'fft' : 'sr',
+                tonverkMode: chkTonverk ? !!chkTonverk.checked : false,
                 tuneEnabled: !!chkTune.checked,
                 tuneNote: selTuneNote.value,
                 tuneOctave: parseInt(selTuneOct.value,10),
@@ -3996,15 +4156,25 @@ function randomName4(used){
               const pp = dpComputePitchParams(basePPC, prefsNow);
               const loop = (ctx && ctx.previewLoop != null) ? !!ctx.previewLoop : true;
 
-              // NOTE: we intentionally omit 'midi' here so the preview plays back
-              // exactly like the exported chain WAV (at pp.sampleRate / pp.pointsPerCycle).
-              root.startWavetablePreview && root.startWavetablePreview(seq, {
-                loop,
-                sampleRate: pp.sampleRate,
-                pointsPerCycle: pp.pointsPerCycle,
-                pitchMethod: pp.pitchMethod,
-                pitchParams: pp,
-              });
+              // Preview normally mirrors the exported chain WAV pitch exactly.
+              // Tonverk mode is an exception: we keep the frame size match, but audition it
+              // musically via MIDI so the scan remains useful to listen to.
+              if (pp.tonverkMode){
+                root.startWavetablePreview && root.startWavetablePreview(seq, {
+                  loop,
+                  midi: (ctx && ctx.previewMidi != null) ? ctx.previewMidi : 60,
+                  pointsPerCycle: pp.pointsPerCycle,
+                  pitchMethod: pp.pitchMethod,
+                });
+              } else {
+                root.startWavetablePreview && root.startWavetablePreview(seq, {
+                  loop,
+                  sampleRate: pp.sampleRate,
+                  pointsPerCycle: pp.pointsPerCycle,
+                  pitchMethod: pp.pitchMethod,
+                  pitchParams: pp,
+                });
+              }
             }catch(err){
               console.error(err);
               announceIO('Preview failed (see Console).', true);
@@ -4034,6 +4204,7 @@ function randomName4(used){
             baseSampleRate: parseInt(selSR.value,10),
             pitchOctaves: parseInt(selOct.value,10),
             pitchMethod: rFft.checked ? 'fft' : 'sr',
+            tonverkMode: chkTonverk ? !!chkTonverk.checked : false,
             tuneEnabled: !!chkTune.checked,
             tuneNote: selTuneNote.value,
             tuneOctave: parseInt(selTuneOct.value,10),
@@ -4057,11 +4228,11 @@ function randomName4(used){
         btnRow.append(btnCancel, btnOK);
 
         if (allowPalindromeChain){
-          if (allowSlotScope) dlg.append(h, p, scopeBox, dlBox, rowAdv, advBox, btnRow);
-          else dlg.append(h, p, dlBox, rowAdv, advBox, btnRow);
+          if (allowSlotScope) dlg.append(h, p, scopeBox, dlBox, tonverkBox, rowAdv, advBox, btnRow);
+          else dlg.append(h, p, dlBox, tonverkBox, rowAdv, advBox, btnRow);
         } else {
-          if (allowSlotScope) dlg.append(h, p, scopeBox, rowAdv, advBox, btnRow);
-          else dlg.append(h, p, rowAdv, advBox, btnRow);
+          if (allowSlotScope) dlg.append(h, p, scopeBox, tonverkBox, rowAdv, advBox, btnRow);
+          else dlg.append(h, p, tonverkBox, rowAdv, advBox, btnRow);
         }
         overlay.appendChild(dlg);
         document.body.appendChild(overlay);
@@ -4080,7 +4251,8 @@ function randomName4(used){
     btnExportSlot.title = 'Export the current slot as a single-cycle WAV (PCM 16-bit, mono) with embedded loop points.'
       + '\n\nDefault (SAFE): 44,100 Hz, points-per-cycle locked to the slot buffer (no resampling, no processing).'
       + '\n\nIf slots are selected: exports selected slot(s) as WAV(s). For 1–5 slots this downloads WAV file(s) directly; for 6+ slots it downloads a ZIP. (Shift+Click can also include a packed chain WAV.)'
-      + '\n\nShift+Click: Advanced pitch/tuning export (octave steps or tuned note) using either WAV sample-rate metadata (no resampling) or FFT-style periodic resampling.';
+      + '\n\nShift+Click: Advanced pitch/tuning export (octave steps or tuned note) using either WAV sample-rate metadata (no resampling) or FFT-style periodic resampling.'
+      + '\n\nThe advanced dialog also includes a Tonverk wavetable mode toggle that auto-writes _wt2048 WAVs.';
     btnExportSlot.onclick = async (ev)=>{
       const shift = !!(ev && ev.shiftKey);
       const alt = !!(ev && ev.altKey);
@@ -4108,7 +4280,14 @@ function randomName4(used){
 
         const exportName = (s === editorSlot) ? (EDIT.name || w.name || 'WAVE') : (w.name || 'WAVE');
         const nm4 = _alnum4(exportName);
-        infos.push({ slot:s, nm4, dataU8: new Uint8Array(w.dataU8) });
+        infos.push({
+          slot:s,
+          nm4,
+          nameStem: exportName,
+          dataU8: new Uint8Array(w.dataU8),
+          srcFloat: (!useEditor && w._srcFloat && w._srcFloat.length) ? w._srcFloat : null,
+          tables6132: (!useEditor && w._tables6132) ? w._tables6132 : null,
+        });
       }
 
       if (!infos.length){
@@ -4150,7 +4329,7 @@ function randomName4(used){
         // Only add suffix when the output differs from SAFE defaults.
         const safeSR = 44100;
         const safePPC = pp.basePointsPerCycle|0;
-        if (!pp.adv) return '';
+        if (pp.tonverkMode || !pp.adv) return '';
 
         const parts = [];
         if (pp.tuneEnabled && pp.tuneLabel) parts.push(pp.tuneLabel);
@@ -4170,7 +4349,9 @@ function randomName4(used){
           if (typeof periodicResampleFloatFFT !== 'function' || typeof pcm16WavFromInt16 !== 'function'){
             throw new Error('FFT resampler or WAV writer is not available.');
           }
-          const srcF = u8ToCycleFloat(info.dataU8);
+          const srcF = pp.tonverkMode
+            ? dpBestTonverkExportSourceFloat(info, pp.pointsPerCycle|0)
+            : u8ToCycleFloat(info.dataU8);
           const dstF = periodicResampleFloatFFT(srcF, pp.pointsPerCycle|0);
           const pcm = new Int16Array(dstF.length);
           for (let i=0;i<dstF.length;i++){
@@ -4240,7 +4421,7 @@ function randomName4(used){
             if (exportSingles){
               if (!r.wavBytes) continue;
               const baseName = dpWavFilenameForSlotMode(info.slot, info.nm4, false);
-              const outName = baseName.replace(/\.wav$/i, `${wavSuffix(r.pp)}.wav`);
+              const outName = dpFinalizeExportWavFilename(baseName, wavSuffix(r.pp), prefs);
               files.push({ name: outName, bytes: r.wavBytes });
             }
 
@@ -4328,7 +4509,14 @@ function randomName4(used){
               return;
             }
 
-            const chainName = `${folderChain}MM-DIGIPRO-SELECTED-PACKED-CHAIN${chainTag}${suffix}.wav`;
+            const chainBase = (prefs && prefs.tonverkMode)
+              ? dpTonverkChainBaseName(infos, 'wavetable')
+              : `MM-DIGIPRO-SELECTED-PACKED-CHAIN${chainTag}${suffix}`;
+            const chainName = dpFinalizeExportWavFilename(
+              `${folderChain}${chainBase}.wav`,
+              '',
+              prefs
+            );
             files.push({ name: chainName, bytes: chainWavBytes });
           }
 
@@ -4378,7 +4566,7 @@ function randomName4(used){
         const { wavBytes, pp } = buildWavBytes(info);
         if (!wavBytes){ announceIO('Could not render WAV for this slot.', true); return; }
         const baseName = dpWavFilenameForSlotMode(info.slot, info.nm4, false);
-        const outName = baseName.replace(/\.wav$/i, `${wavSuffix(pp)}.wav`);
+        const outName = dpFinalizeExportWavFilename(baseName, wavSuffix(pp), prefs);
         downloadBlob(new Blob([wavBytes], {type:'audio/wav'}), outName);
       }catch(err){
         console.error(err);
@@ -4420,6 +4608,7 @@ function randomName4(used){
       + '\n\nShift+Click: Advanced pitch/tuning export (octave steps or tuned note) using either:'
       + '\n  • WAV sample-rate metadata (no resampling), or'
       + '\n  • FFT-style periodic resampling (keeps the base sample rate).'
+      + '\n  • Tonverk wavetable mode (auto 2048 samples/wave + _wt2048 filename).'
       + '\n\nAdvanced (Shift+Click) also lets you choose a slot scope:'
       + '\n  • All 64 slots (include empty as silence),'
       + '\n  • Filled slots only, or'
@@ -4448,7 +4637,14 @@ btnExportBankZip.onclick = async (ev)=>{
         if (w && w.dataU8){
           const dataU8 = new Uint8Array(w.dataU8);
           const nm4 = _alnum4(useEditor ? (EDIT.name||w.name||'WAVE') : (w.name||'WAVE'));
-          return { slot:s, nm4, dataU8 };
+          return {
+            slot:s,
+            nm4,
+            nameStem: useEditor ? (EDIT.name||w.name||'WAVE') : (w.name||'WAVE'),
+            dataU8,
+            srcFloat: (!useEditor && w._srcFloat && w._srcFloat.length) ? w._srcFloat : null,
+            tables6132: (!useEditor && w._tables6132) ? w._tables6132 : null,
+          };
         }
         if (!includeEmpty) return null;
         return { slot:s, nm4:'EMPT', dataU8: new Uint8Array(silentU8) };
@@ -4603,11 +4799,11 @@ btnExportBankZip.onclick = async (ev)=>{
 
       // Used for file naming.
       const wavSuffixParts = [];
-      if (pitchParams && pitchParams.tuneEnabled && pitchParams.tuneLabel){
+      if (pitchParams && !pitchParams.tonverkMode && pitchParams.tuneEnabled && pitchParams.tuneLabel){
         wavSuffixParts.push(pitchParams.tuneLabel);
       }
-      if (outPPC !== basePPC){ wavSuffixParts.push(outPPC + 'ppc'); }
-      if (outSR !== 44100){ wavSuffixParts.push(outSR + 'Hz'); }
+      if (!(pitchParams && pitchParams.tonverkMode) && outPPC !== basePPC){ wavSuffixParts.push(outPPC + 'ppc'); }
+      if (!(pitchParams && pitchParams.tonverkMode) && outSR !== 44100){ wavSuffixParts.push(outSR + 'Hz'); }
       const wavSuffix = wavSuffixParts.length ? ('-' + wavSuffixParts.join('-')) : '';
 
       beginJob('Export bank WAVs');
@@ -4645,7 +4841,9 @@ btnExportBankZip.onclick = async (ev)=>{
             if (JOB.cancelled) break;
             const inf = infos[idx];
 
-            const srcF = u8ToCycleFloat(inf.dataU8);
+            const srcF = (pitchParams && pitchParams.tonverkMode)
+              ? dpBestTonverkExportSourceFloat(inf, outPPC)
+              : u8ToCycleFloat(inf.dataU8);
             const resF = periodicResampleFloatFFT(srcF, outPPC);
 
             const pcm = new Int16Array(outPPC);
@@ -4666,7 +4864,7 @@ btnExportBankZip.onclick = async (ev)=>{
                 ? [{ id: 'smpl', bytes: buildSmplLoopChunk(0, outPPC, outSR, smplOpts) }]
                 : null;
               const wavBytes = pcm16WavFromInt16(pcm, outSR, extras);
-              const wavName = folderSingles + dpWavFilenameForSlotMode(inf.slot, inf.nm4, false).replace(/\.wav$/i, wavSuffix + '.wav');
+              const wavName = folderSingles + dpFinalizeExportWavFilename(dpWavFilenameForSlotMode(inf.slot, inf.nm4, false), wavSuffix, prefs);
               files.push({ name: wavName, bytes: wavBytes });
             }
             if (exportChain && slotPCM) slotPCM[idx] = pcm;
@@ -4702,7 +4900,7 @@ btnExportBankZip.onclick = async (ev)=>{
               const inf = infos[idx];
 
               const wavBytes = dpPlainWavBytesFromU8(inf.dataU8, outSR);
-              const wavName = folderSingles + dpWavFilenameForSlotMode(inf.slot, inf.nm4, false).replace(/\.wav$/i, wavSuffix + '.wav');
+              const wavName = folderSingles + dpFinalizeExportWavFilename(dpWavFilenameForSlotMode(inf.slot, inf.nm4, false), wavSuffix, prefs);
               files.push({ name: wavName, bytes: wavBytes });
               await sleepAbortable(0, JOB.signal);
             }
@@ -4728,12 +4926,17 @@ btnExportBankZip.onclick = async (ev)=>{
         }
 
         if (exportChain){
-          const chainBaseName = (scopeLabel === 'BANK')
-            ? 'MM-DIGIPRO-PACKED-CHAIN'
-            : `MM-DIGIPRO-${scopeLabel}-PACKED-CHAIN`;
+          const chainBaseName = (prefs && prefs.tonverkMode)
+            ? dpTonverkChainBaseName(infos, scopeLabel === 'BANK' ? 'wavetable' : scopeLabel)
+            : ((scopeLabel === 'BANK')
+              ? 'MM-DIGIPRO-PACKED-CHAIN'
+              : `MM-DIGIPRO-${scopeLabel}-PACKED-CHAIN`);
 
           // Packed chain (loop markers optional)
-          files.push({ name: `${folderChain}${chainBaseName}${chainTag}${wavSuffix}.wav`, bytes: chainBytes });
+          files.push({
+            name: dpFinalizeExportWavFilename(`${folderChain}${chainBaseName}${chainTag}${wavSuffix}.wav`, '', prefs),
+            bytes: chainBytes
+          });
         }
 
         // Validate chain render.

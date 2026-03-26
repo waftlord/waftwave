@@ -19,38 +19,6 @@ It also includes optional tooling for **Machinedrum UW** wave sending (see `asse
 - `import-export.js` — WAV / SYX / JSON import + WAV / SYX / ZIP export
 - `scripts/e2e-sim-check.mjs` — Node-based smoke test for asset wiring and core browser/runtime flows
 
-## Quick start
-
-### Option A: Run locally (recommended for development)
-
-WebMIDI generally requires a **secure context**. `http://localhost` counts as secure in modern browsers.
-
-```bash
-# from the repo root
-python3 -m http.server 8000
-# then open: http://localhost:8000
-```
-
-### Optional: run the smoke test
-
-If you have Node.js available, you can run the included smoke test before sharing changes:
-
-```bash
-node scripts/e2e-sim-check.mjs
-```
-
-### Option B: Host on GitHub Pages
-
-This repo is a static site (no build step), so it works well with **GitHub Pages**:
-
-1. Push the repo to GitHub.
-2. Open **Settings → Pages**.
-3. Under **Build and deployment**, choose **Deploy from a branch**.
-4. Select your default branch and the **`/ (root)`** folder.
-5. Save and wait for the Pages deploy to finish.
-
-GitHub Pages is served over HTTPS, which satisfies the browser secure-context requirement for WebMIDI. Chromium-based browsers are still recommended for SysEx access.
-
 ## Browser / MIDI notes
 
 - WebMIDI + SysEx is best supported in **Chromium‑based browsers** (Chrome / Edge).

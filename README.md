@@ -59,6 +59,8 @@ GitHub Pages is served over HTTPS, which satisfies the browser secure-context re
 
 The DigiPRO waveform dump message is a fixed‑size **7027‑byte SysEx** message.
 
+Under the hood, DigiPRO decode reads the `0x5D` SysEx header, slot, and 4‑character name, 7‑bit unpacks the **7008‑byte** payload back into **6132 raw bytes**, and then reassembles those bytes as **1022 six‑byte blocks** laid out `A0_hi, A0_lo, B_hi, A1_hi, A1_lo, B_lo`, which become three `Int16Array(1022)` streams (`t0`, `t1`, `t2`). Encode does the reverse, but first renders a single cycle into the Monomachine/C6 table structure: DC is removed, the wave is resampled to **1024** samples, FFT/C6 rolloff and coefficient weighting are applied, and nine stacked mip levels (`1024..4`) are quantized into the A/B streams before being repacked, 7‑bit encoded, and wrapped with checksum/length bytes. The “special sauce trapezoid” is this multi‑resolution table layout: `t0` and `t1` hold the main A stream as even/odd samples across the stacked levels, while `t2` carries the companion low‑passed B stream for the smaller levels plus two zero terminators, so DigiPRO stores a compact wavetable pyramid rather than one flat 1024‑sample waveform.
+
 ## WAV export notes
 
 - **Export slot WAV** exports the current slot as a single-cycle WAV with embedded loop points. If multiple slots are selected, it exports a ZIP of the selected WAVs.

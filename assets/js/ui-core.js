@@ -480,6 +480,33 @@ const DP_SAMPLES_PER_TABLE =
     return Math.max(0, Math.min(127, (base + getWavetableTuneSemitones())|0));
   }
 
+  function refreshWavetableTuneUiState(){
+    try{
+      if (typeof refreshEditorBar === 'function' && refreshEditorBar()) return getWavetableTuneSemitones();
+    }catch(_){ }
+    try{
+      if (typeof requestWavetableViewportDraw === 'function') requestWavetableViewportDraw();
+    }catch(_){ }
+    return getWavetableTuneSemitones();
+  }
+
+  function setWavetableAuditionTune(next, opts){
+    opts = opts || {};
+    const st = setWavetableTuneSemitones(next);
+    refreshWavetableTuneUiState();
+    if (opts.restartPreview){
+      try{
+        if (typeof restartCurrentWavetableAudition === 'function') restartCurrentWavetableAudition();
+      }catch(_){ }
+    }
+    return st|0;
+  }
+
+  function stepWavetableAuditionTune(delta, opts){
+    const st = getWavetableTuneSemitones();
+    return setWavetableAuditionTune((st|0) + (delta|0), opts);
+  }
+
   let btnEvolve = null;
   let btnBlend  = null;
 

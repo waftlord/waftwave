@@ -187,92 +187,149 @@
     ctx.restore();
   }
 
+  function stopViewportScan(){
+    try{
+      if (typeof stopWavetablePreview === 'function') stopWavetablePreview();
+      else stopPreview();
+    }catch(_){ }
+  }
+
+  function getViewportScanScope(){
+    const sel = Array.from(SELECTED || [])
+      .map(n=>n|0)
+      .filter(s=>s>=0 && s<64)
+      .sort((a,b)=>a-b);
+
+    // Two or more selected slots define an explicit scan window.
+    if ((sel.length|0) > 1){
+      return {
+        startSlot: sel[0]|0,
+        endSlot: sel[sel.length - 1]|0,
+        isRange: true,
+      };
+    }
+
+    const fallbackSlot = (EDIT && typeof EDIT.slot === 'number')
+      ? (EDIT.slot|0)
+      : (((typeof activeIdx === 'number') ? (activeIdx|0) : 0));
+
+    return {
+      startSlot: clamp(fallbackSlot, 0, 63),
+      endSlot: 63,
+      isRange: false,
+    };
+  }
+
+  function buildViewportScanSequence(scope){
+    scope = scope || getViewportScanScope();
+    const startSlot = clamp(scope.startSlot, 0, 63);
+    const endSlot = clamp(scope.endSlot, startSlot, 63);
+    let basePPC = 0;
+    let hasAudible = false;
+    const found = [];
+
+    for (let s=startSlot; s<=endSlot; s++){
+      const rec = dpViewRecordForSlot(s);
+      const u8 = (rec && rec.dataU8 && rec.dataU8.length)
+        ? ((rec.dataU8 instanceof Uint8Array) ? rec.dataU8 : new Uint8Array(rec.dataU8))
+        : null;
+      if (u8 && (u8.length|0) > 0){
+        if (!(basePPC > 0)) basePPC = u8.length|0;
+        if (!hasAudible && !isSilentU8(u8)) hasAudible = true;
+      }
+      found.push(u8);
+    }
+    if (!(basePPC > 0)) basePPC = 96;
+
+    const seq = [];
+    for (let i=0; i<found.length; i++){
+      const u8 = found[i];
+      if (!u8){
+        const silent = new Uint8Array(basePPC);
+        silent.fill(128);
+        seq.push(silent);
+        continue;
+      }
+      if ((u8.length|0) !== (basePPC|0)){
+        return { error: 'Cannot preview wavetable scan: slot cycle lengths differ.' };
+      }
+      seq.push(u8);
+    }
+
+    if (!hasAudible){
+      return { error: scope.isRange ? 'Nothing to preview in the selected range.' : 'Nothing to preview from the current slot.' };
+    }
+
+    return {
+      seq,
+      basePPC,
+      scope: {
+        startSlot,
+        endSlot,
+        isRange: !!scope.isRange,
+      },
+    };
+  }
+
+  function startViewportScan(){
+    const built = buildViewportScanSequence(getViewportScanScope());
+    if (!built || !Array.isArray(built.seq) || !(built.seq.length|0)){
+      if (built && built.error) announceIO(built.error, true);
+      else announceIO('Nothing to preview from the current slot.', true);
+      return false;
+    }
+
+    const basePPC = (built.basePPC|0) || 96;
+    let pp = null;
+    try{
+      const prefs = (typeof dpLoadExportWavPrefs === 'function') ? dpLoadExportWavPrefs() : null;
+      pp = (typeof dpComputePitchParams === 'function') ? dpComputePitchParams(basePPC, prefs) : null;
+    }catch(_){ pp = null; }
+
+    try{
+      if (typeof startWavetablePreview === 'function'){
+        const auditionMidi = dpWavetablePreviewMidi(DIGIPRO_PREVIEW_MIDI);
+        startWavetablePreview(built.seq, {
+          loop: false,
+          midi: auditionMidi,
+          sampleRate: pp ? pp.sampleRate : 44100,
+          pointsPerCycle: pp ? pp.pointsPerCycle : basePPC,
+          pitchMethod: pp ? pp.pitchMethod : 'sr',
+          pitchParams: pp || undefined,
+        });
+        return true;
+      }
+      stopViewportScan();
+      return false;
+    }catch(err){
+      console.error(err);
+      announceIO('Could not preview wavetable scan.', true);
+      return false;
+    }
+  }
+
+  function restartCurrentWavetableAudition(){
+    if (KB_VIEW_MODE !== 'pads') return false;
+
+    try{
+      if (typeof isWavetablePreviewRunning === 'function' && isWavetablePreviewRunning()){
+        return !!startViewportScan();
+      }
+    }catch(_){ }
+
+    if (previewSlotIdx != null){
+      const rec = dpViewRecordForSlot(previewSlotIdx|0);
+      startPreview(rec && rec.dataU8 ? rec.dataU8 : null, dpWavetablePreviewMidi(DIGIPRO_PREVIEW_MIDI));
+      return true;
+    }
+
+    return false;
+  }
+
   function attachWavetableViewportEvents(){
     const c = wavetableCanvas; if (!c) return;
     if (c._boundWavetableViewport) return;
     c._boundWavetableViewport = true;
-
-    function stopViewportScan(){
-      try{
-        if (typeof stopWavetablePreview === 'function') stopWavetablePreview();
-        else stopPreview();
-      }catch(_){ }
-    }
-
-    function buildViewportScanSequence(startSlot){
-      startSlot = clamp(startSlot, 0, 63);
-      let basePPC = 0;
-      let hasAudible = false;
-      const found = [];
-      for (let s=startSlot; s<64; s++){
-        const rec = dpViewRecordForSlot(s);
-        const u8 = (rec && rec.dataU8 && rec.dataU8.length)
-          ? ((rec.dataU8 instanceof Uint8Array) ? rec.dataU8 : new Uint8Array(rec.dataU8))
-          : null;
-        if (u8 && (u8.length|0) > 0){
-          if (!(basePPC > 0)) basePPC = u8.length|0;
-          if (!hasAudible && !isSilentU8(u8)) hasAudible = true;
-        }
-        found.push(u8);
-      }
-      if (!(basePPC > 0)) basePPC = 96;
-
-      const seq = [];
-      for (let i=0; i<found.length; i++){
-        const u8 = found[i];
-        if (!u8){
-          const silent = new Uint8Array(basePPC);
-          silent.fill(128);
-          seq.push(silent);
-          continue;
-        }
-        if ((u8.length|0) !== (basePPC|0)){
-          return { error: 'Cannot preview wavetable scan: slot cycle lengths differ.' };
-        }
-        seq.push(u8);
-      }
-
-      if (!hasAudible) return { error: 'Nothing to preview from the current slot.' };
-      return { seq, basePPC };
-    }
-
-    function startViewportScan(){
-      const startSlot = (EDIT && typeof EDIT.slot === 'number')
-        ? (EDIT.slot|0)
-        : (((typeof activeIdx === 'number') ? (activeIdx|0) : 0));
-      const built = buildViewportScanSequence(startSlot);
-      if (!built || !Array.isArray(built.seq) || !(built.seq.length|0)){
-        if (built && built.error) announceIO(built.error, true);
-        else announceIO('Nothing to preview from the current slot.', true);
-        return;
-      }
-
-      const basePPC = (built.basePPC|0) || 96;
-      let pp = null;
-      try{
-        const prefs = (typeof dpLoadExportWavPrefs === 'function') ? dpLoadExportWavPrefs() : null;
-        pp = (typeof dpComputePitchParams === 'function') ? dpComputePitchParams(basePPC, prefs) : null;
-      }catch(_){ pp = null; }
-
-      try{
-        if (typeof startWavetablePreview === 'function'){
-          const auditionMidi = dpWavetablePreviewMidi(DIGIPRO_PREVIEW_MIDI);
-          startWavetablePreview(built.seq, {
-            loop: false,
-            midi: auditionMidi,
-            sampleRate: pp ? pp.sampleRate : 44100,
-            pointsPerCycle: pp ? pp.pointsPerCycle : basePPC,
-            pitchMethod: pp ? pp.pitchMethod : 'sr',
-            pitchParams: pp || undefined,
-          });
-        } else {
-          stopViewportScan();
-        }
-      }catch(err){
-        console.error(err);
-        announceIO('Could not preview wavetable scan.', true);
-      }
-    }
 
     c.addEventListener('click', (ev)=>{
       if (ev && ev.shiftKey){
@@ -1505,9 +1562,10 @@ cell.addEventListener('dragleave', ()=>{
       }
 
       // Read last-chosen evolve settings.
-      const recipe = (typeof EVOLVE_STATE !== 'undefined' && EVOLVE_STATE && EVOLVE_STATE.recipe)
-        ? String(EVOLVE_STATE.recipe)
-        : 'seeded';
+      const recipes = (typeof dpGetStoredModeChain === 'function')
+        ? dpGetStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', (typeof EVOLVE_RECIPES !== 'undefined') ? EVOLVE_RECIPES : [], 'seeded', 3)
+        : [((typeof EVOLVE_STATE !== 'undefined' && EVOLVE_STATE && EVOLVE_STATE.recipe) ? String(EVOLVE_STATE.recipe) : 'seeded')];
+      const recipe = String((recipes && recipes[0]) || 'seeded');
       let pathId = (typeof EVOLVE_STATE !== 'undefined' && EVOLVE_STATE && EVOLVE_STATE.path)
         ? String(EVOLVE_STATE.path)
         : 'oneway';
@@ -1518,10 +1576,14 @@ cell.addEventListener('dragleave', ()=>{
       // Some recipes support alternate skew scanning; fall back to oneway if not supported.
       let altOk = false;
       try{
-        const r = (typeof EVOLVE_RECIPES !== 'undefined' && Array.isArray(EVOLVE_RECIPES))
-          ? EVOLVE_RECIPES.find(x=>x && x.id === recipe)
-          : null;
-        altOk = !!(r && r.altSkew);
+        if (typeof dpEvolveRecipeSupportsAlt === 'function'){
+          altOk = Array.isArray(recipes) && recipes.length > 0 && recipes.every(id=>dpEvolveRecipeSupportsAlt(id));
+        } else {
+          const r = (typeof EVOLVE_RECIPES !== 'undefined' && Array.isArray(EVOLVE_RECIPES))
+            ? EVOLVE_RECIPES.find(x=>x && x.id === recipe)
+            : null;
+          altOk = !!(r && r.altSkew);
+        }
       }catch(_){ altOk = false; }
       if (pathId === 'alternate' && !altOk) pathId = 'oneway';
 
@@ -1594,16 +1656,19 @@ cell.addEventListener('dragleave', ()=>{
             t = (N <= 1) ? 1 : (i / (N - 1));
           }
 
-          // PWM domain handling matches the Evolve tool.
-          if (recipe === 'pwm' && pathId !== 'alternate' && pwmDomain === 'half'){
-            t = 0.5 + 0.5 * _clamp01(t);
-          } else {
-            t = _clamp01(t);
+          let tBase = _clamp01(t);
+          if (typeof dpApplyEvolveRecipeChain !== 'function'){
+            // Legacy single-step fallback keeps the original PWM handling.
+            tBase = (recipe === 'pwm' && pathId !== 'alternate' && pwmDomain === 'half')
+              ? (0.5 + 0.5 * tBase)
+              : tBase;
           }
 
-          const out = (pathId === 'alternate' && altOk)
-            ? dpEvolveGenerate(item.dataU8, t, recipe, { altSkew:true })
-            : dpEvolveGenerate(item.dataU8, t, recipe);
+          const out = (typeof dpApplyEvolveRecipeChain === 'function')
+            ? dpApplyEvolveRecipeChain(item.dataU8, tBase, recipes, pathId, pwmDomain)
+            : ((pathId === 'alternate' && altOk)
+              ? dpEvolveGenerate(item.dataU8, tBase, recipe, { altSkew:true })
+              : dpEvolveGenerate(item.dataU8, tBase, recipe));
 
           const nm = useNumberedNames
             ? ((prefix2 + String(tSlot+1).padStart(2,'0')).slice(0,4).padEnd(4,'0'))
@@ -1641,12 +1706,12 @@ cell.addEventListener('dragleave', ()=>{
       }
 
       const __bankAfter = captureBankState(targets);
+      const recipeLabel = (typeof dpEvolveRecipeLabel === 'function') ? dpEvolveRecipeLabel(recipes) : recipe;
       const label = (mode === 'selection')
-        ? `Paste Special (Evolve) into ${targets.length} selected slot(s)`
-        : `Paste Special (Evolve) ${targets.length} slot(s) @ ${start+1}`;
+        ? `Paste Special (Evolve: ${recipeLabel}) into ${targets.length} selected slot(s)`
+        : `Paste Special (Evolve: ${recipeLabel}) ${targets.length} slot(s) @ ${start+1}`;
       bankPush({ label, before: __bankBefore, after: __bankAfter });
 
-      const recipeLabel = (typeof dpEvolveRecipeLabel === 'function') ? dpEvolveRecipeLabel(recipe) : recipe;
       announceIO(`Paste Special: Evolved ${targets.length} slot(s) (${recipeLabel}).`);
       updateButtonsState();
     }
@@ -1700,15 +1765,21 @@ cell.addEventListener('dragleave', ()=>{
       const N = targets.length|0;
       if (!N) return;
 
-      // Read last-chosen morph settings (two-wave morph mode).
-      const morphMode = (typeof MORPH_STATE !== 'undefined' && MORPH_STATE && MORPH_STATE.mode)
-        ? String(MORPH_STATE.mode)
-        : ((typeof EVOLVE_DUAL_STATE !== 'undefined' && EVOLVE_DUAL_STATE && EVOLVE_DUAL_STATE.mode)
-          ? String(EVOLVE_DUAL_STATE.mode)
-          : 'specblur');
-
-      const isPM = (morphMode === 'pm');
-      const pmMax = 0.18; // match Morph tool (FM/PM Boost max phase deviation in cycles)
+      // Read last-chosen morph settings (prefer Morph tool state, otherwise the Evolve dual-mode chain).
+      const morphModes = (typeof dpGetStoredModeChain === 'function')
+        ? (
+            (typeof MORPH_STATE !== 'undefined' && MORPH_STATE && (MORPH_STATE.modes || MORPH_STATE.mode))
+              ? dpGetStoredModeChain(MORPH_STATE, 'modes', 'mode', (typeof EVOLVE_DUAL_MODES !== 'undefined') ? EVOLVE_DUAL_MODES : [], 'specblur', 3)
+              : dpGetStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', (typeof EVOLVE_DUAL_MODES !== 'undefined') ? EVOLVE_DUAL_MODES : [], 'specblur', 3)
+          )
+        : [(
+            (typeof MORPH_STATE !== 'undefined' && MORPH_STATE && MORPH_STATE.mode)
+              ? String(MORPH_STATE.mode)
+              : ((typeof EVOLVE_DUAL_STATE !== 'undefined' && EVOLVE_DUAL_STATE && EVOLVE_DUAL_STATE.mode)
+                ? String(EVOLVE_DUAL_STATE.mode)
+                : 'specblur')
+          )];
+      const morphMode = String((morphModes && morphModes[0]) || 'specblur');
 
       // Naming: 2-char prefix from first anchor name + destination slot number.
       let prefix2 = 'MR';
@@ -1719,11 +1790,15 @@ cell.addEventListener('dragleave', ()=>{
 
       const __bankBefore = captureBankState(targets, { preferEditor:true });
 
-      // Helper: compute a morph between two endpoints with the current mode.
+      // Helper: compute a morph between two endpoints with the current mode chain.
       const morph2 = (aU8, bU8, t)=>{
+        if (typeof dpApplyMorphModeChain === 'function'){
+          return dpApplyMorphModeChain(aU8, bU8, t, morphModes);
+        }
         const tt = _clamp01(t);
-        if (!isPM) return dpMorphGenerate(aU8, bU8, tt, morphMode);
+        if (morphMode !== 'pm') return dpMorphGenerate(aU8, bU8, tt, morphMode);
         if (typeof dpPhaseModGenerate !== 'function') return dpMorphGenerate(aU8, bU8, tt, 'xfade');
+        const pmMax = 0.18; // match Morph tool (FM/PM Boost max phase deviation in cycles)
         const base = dpMorphGenerate(aU8, bU8, tt, 'xfade');
         const depth = pmMax * 4 * tt * (1 - tt);
         return dpPhaseModGenerate(base, bU8, depth);
@@ -1810,9 +1885,9 @@ cell.addEventListener('dragleave', ()=>{
       }
 
       const __bankAfter = captureBankState(targets);
-      bankPush({ label: 'Paste Special: Morph Table', before: __bankBefore, after: __bankAfter });
+      const modeLabel = (typeof dpEvolveDualModeLabel === 'function') ? dpEvolveDualModeLabel(morphModes) : morphMode;
+      bankPush({ label: `Paste Special: Morph Table (${modeLabel})`, before: __bankBefore, after: __bankAfter });
 
-      const modeLabel = (typeof dpEvolveDualModeLabel === 'function') ? dpEvolveDualModeLabel(morphMode) : morphMode;
       announceIO(`Paste Special: Morph Table built across ${targets.length} slot(s) (${modeLabel}).`);
       updateButtonsState();
     }
@@ -2046,9 +2121,26 @@ cell.addEventListener('dragleave', ()=>{
 
       const key = e.key;
       let handled = false;
+      const isTextEntry = mmIsTextEntryTarget(e.target);
+
+      // Pads mode gets range playback and transposition shortcuts that mirror the 3D view controls.
+      if (KB_VIEW_MODE === 'pads' && !isTextEntry && !(e.metaKey || e.ctrlKey || e.altKey)){
+        if (e.code === 'Space' && e.shiftKey){
+          startViewportScan();
+          handled = true;
+        } else if (e.code === 'Equal' || e.code === 'Minus' || e.code === 'NumpadAdd' || e.code === 'NumpadSubtract'){
+          const dir = (e.code === 'Equal' || e.code === 'NumpadAdd') ? 1 : -1;
+          const delta = (e.shiftKey ? 12 : 1) * dir;
+          if (typeof stepWavetableAuditionTune === 'function'){
+            stepWavetableAuditionTune(delta, { restartPreview: true });
+            handled = true;
+          }
+        }
+      }
 
       // Arrow keys move active tile
-      if (key==='ArrowLeft'){ activeIdx = clamp(activeIdx-1, 0, 63); handled=true; }
+      if (handled){ }
+      else if (key==='ArrowLeft'){ activeIdx = clamp(activeIdx-1, 0, 63); handled=true; }
       else if (key==='ArrowRight'){ activeIdx = clamp(activeIdx+1, 0, 63); handled=true; }
       else if (key==='ArrowUp'){ activeIdx = clamp(activeIdx-8, 0, 63); handled=true; }
       else if (key==='ArrowDown'){ activeIdx = clamp(activeIdx+8, 0, 63); handled=true; }

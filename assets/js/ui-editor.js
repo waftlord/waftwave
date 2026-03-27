@@ -155,7 +155,7 @@ const viewNorm = false;
     const wavetableTuneMinus = el('button');
     wavetableTuneMinus.type = 'button';
     wavetableTuneMinus.textContent = '-';
-    wavetableTuneMinus.title = 'Transpose wavetable audition down by 1 semitone.';
+    wavetableTuneMinus.title = 'Transpose wavetable audition down by 1 semitone. Shortcut: - (Shift for octave).';
 
     const wavetableTuneInput = el('input', 'mm-wavetable-tune-input');
     wavetableTuneInput.type = 'text';
@@ -169,7 +169,7 @@ const viewNorm = false;
     const wavetableTunePlus = el('button');
     wavetableTunePlus.type = 'button';
     wavetableTunePlus.textContent = '+';
-    wavetableTunePlus.title = 'Transpose wavetable audition up by 1 semitone.';
+    wavetableTunePlus.title = 'Transpose wavetable audition up by 1 semitone. Shortcut: = / + (Shift for octave).';
 
     const wavetableTuneReset = el('button');
     wavetableTuneReset.type = 'button';
@@ -186,16 +186,12 @@ const viewNorm = false;
     }
 
     function applyWavetableTune(next){
-      const st = (typeof setWavetableTuneSemitones === 'function')
-        ? setWavetableTuneSemitones(next)
-        : Math.max(-48, Math.min(48, parseInt(next, 10) || 0));
+      const st = (typeof setWavetableAuditionTune === 'function')
+        ? setWavetableAuditionTune(next, { restartPreview: true })
+        : ((typeof setWavetableTuneSemitones === 'function')
+          ? setWavetableTuneSemitones(next)
+          : Math.max(-48, Math.min(48, parseInt(next, 10) || 0)));
       syncWavetableTuneUi();
-      try{
-        if (KB_VIEW_MODE === 'pads' && previewSlotIdx != null){
-          const rec = dpViewRecordForSlot(previewSlotIdx|0);
-          startPreview(rec && rec.dataU8 ? rec.dataU8 : null, wavetablePreviewMidi(DIGIPRO_PREVIEW_MIDI));
-        }
-      }catch(_){ }
       try{
         if (typeof requestWavetableViewportDraw === 'function') requestWavetableViewportDraw();
       }catch(_){ }
@@ -7093,6 +7089,32 @@ ioMsgEl.textContent = 'Ready';
       return { scope: 'all', targets: dpListFilledSlotsIncludingDirtyActive() };
     }
 
+    function dpResolveAmpTargets(scopeMode){
+      const mode = String(scopeMode || 'auto');
+
+      if (mode === 'selected'){
+        const selAll = Array.from(SELECTED||[])
+          .map(x=>x|0)
+          .filter(i=>i>=0 && i<64)
+          .sort((a,b)=>a-b);
+        if (!selAll.length) return { scope:'selected', targets: [] };
+
+        const active = (EDIT && typeof EDIT.slot==='number') ? (EDIT.slot|0) : 0;
+        const targets = [];
+        for (const s of selAll){
+          if (LIB.waves[s]) targets.push(s);
+          else if (s===active && LIB.dirty.has(s) && EDIT.dataU8 && EDIT.dataU8.length) targets.push(s);
+        }
+        return { scope:'selected', targets };
+      }
+
+      if (mode === 'all'){
+        return { scope:'all', targets: dpListFilledSlotsIncludingDirtyActive() };
+      }
+
+      return dpAmpNormTargets();
+    }
+
     // Normalize (peak-match) is now intentionally *selection-only*.
     // This avoids accidental "normalize the whole bank" operations now that the
     // old target-% slider is gone and the action is always 100%.
@@ -7148,6 +7170,590 @@ ioMsgEl.textContent = 'Ready';
 
       announceIO(`Normalized ${targets.length} selected slot${targets.length===1?'':'s'} to ${pct}%.`);
       updateButtonsState();
+    }
+
+    const AMP_SHIFT_MODES = [
+      { id:'trim',      label:'Exact trim', shortLabel:'Trim',      minCount:1, desc:'Apply the same dB trim to every target slot. Good for a single slot or when you want one exact value.' },
+      { id:'ramp',      label:'Ramp',       shortLabel:'Ramp',      minCount:2, desc:'Sweep from Low dB to High dB across the target slots in order.' },
+      { id:'steps',     label:'Stepped',    shortLabel:'Stepped',   minCount:2, desc:'Quantized ramp from Low dB to High dB. Great for terraced wavetable loudness steps.' },
+      { id:'pingpong',  label:'Ping-pong',  shortLabel:'Ping-pong', minCount:3, desc:'Sweep Low -> High -> Low across the target range. Mirrors the musical scan-path used elsewhere.' },
+      { id:'alternate', label:'Alt skew',   shortLabel:'Alt skew',  minCount:2, desc:'Alternate around the midpoint between Low/High while increasing depth. A gain version of the Alt skew idea.' },
+    ];
+
+    const AMP_SHIFT_MODE_GROUPS = [
+      { title:'Precision', items: AMP_SHIFT_MODES.filter(m=>m.id === 'trim') },
+      { title:'Series', items: AMP_SHIFT_MODES.filter(m=>m.id !== 'trim') },
+    ];
+
+    function dpAmpModeMeta(modeId){
+      const id = String(modeId || 'trim');
+      return AMP_SHIFT_MODES.find(m=>m && m.id === id) || AMP_SHIFT_MODES[0];
+    }
+
+    function dpAmpClampDb(v, fallback){
+      const n = Number(v);
+      const base = isFinite(n) ? n : Number(fallback||0);
+      return Math.max(-24, Math.min(24, base));
+    }
+
+    function dpAmpFormatDb(v){
+      const db = dpAmpClampDb(v, 0);
+      const s = (db > 0) ? '+' : '';
+      return `${s}${db.toFixed(1)} dB`;
+    }
+
+    function dpAmpApplyCurveUnit(v, curve){
+      const x = _clamp01(Number(v||0));
+      if (String(curve||'linear') === 'smooth') return x*x*(3 - 2*x);
+      return x;
+    }
+
+    function dpAmpLerp(lo, hi, t){
+      return Number(lo||0) + (Number(hi||0) - Number(lo||0)) * Number(t||0);
+    }
+
+    function dpAmpPlanValues(countArg, opts){
+      const count = Math.max(0, countArg|0);
+      const out = [];
+      if (count < 1) return out;
+
+      opts = opts || {};
+      const mode = String(opts.mode || 'trim');
+      const exactDb = dpAmpClampDb(opts.exactDb, 0);
+      const lowDb = dpAmpClampDb(opts.lowDb, 0);
+      const highDb = dpAmpClampDb(opts.highDb, 0);
+      const curve = (String(opts.curve || 'linear') === 'smooth') ? 'smooth' : 'linear';
+      const stepBands = _clampInt(parseInt(opts.steps,10)||4, 2, 12);
+
+      if (mode === 'trim'){
+        for (let i=0;i<count;i++) out.push(exactDb);
+        return out;
+      }
+
+      if (mode === 'alternate'){
+        const mid = (lowDb + highDb) * 0.5;
+        const halfSpan = (highDb - lowDb) * 0.5;
+        const pairs = Math.ceil(count / 2);
+        for (let i=0;i<count;i++){
+          const pairIdx = Math.floor(i / 2);
+          const depthRaw = (pairs <= 1) ? 1 : ((pairIdx + 1) / pairs);
+          const depth = dpAmpApplyCurveUnit(depthRaw, curve);
+          const sign = (i % 2 === 0) ? 1 : -1;
+          out.push(mid + sign * halfSpan * depth);
+        }
+        return out;
+      }
+
+      let weights = [];
+      if (mode === 'pingpong'){
+        let peak = 0;
+        for (let i=0;i<count;i++){
+          const u = (count <= 1) ? 0 : (i / Math.max(1, count - 1));
+          const tri = 1 - Math.abs(2*u - 1);
+          if (tri > peak) peak = tri;
+          weights.push(tri);
+        }
+        if (!(peak > 0)) peak = 1;
+        weights = weights.map(v => v / peak);
+      } else {
+        for (let i=0;i<count;i++){
+          const u = (count <= 1) ? 1 : (i / Math.max(1, count - 1));
+          weights.push(u);
+        }
+      }
+
+      for (let i=0;i<count;i++){
+        let w = dpAmpApplyCurveUnit(weights[i], curve);
+        if (mode === 'steps' && stepBands > 1){
+          w = Math.round(w * (stepBands - 1)) / (stepBands - 1);
+        }
+        out.push(dpAmpLerp(lowDb, highDb, w));
+      }
+
+      return out;
+    }
+
+    function dpAmpPreviewTargets(scopeMode){
+      const resolved = dpResolveAmpTargets(scopeMode);
+      const scope = resolved.scope;
+      const targets = resolved.targets || [];
+      const editorSlot = (EDIT && typeof EDIT.slot==='number') ? (EDIT.slot|0) : 0;
+      const slots = [];
+      const waves = [];
+
+      for (const s of targets){
+        const isActive = (s === editorSlot);
+        const useEditor = isActive && LIB.dirty && LIB.dirty.has(s) && EDIT.dataU8 && EDIT.dataU8.length;
+        const src = useEditor ? EDIT.dataU8 : (LIB.waves[s] ? LIB.waves[s].dataU8 : null);
+        if (!src || !src.length) continue;
+        slots.push(s|0);
+        waves.push(src);
+      }
+
+      return { scope, slots, waves };
+    }
+
+    function dpAmpEstimateClipFlags(waves, dbValues){
+      const arr = Array.isArray(waves) ? waves : [];
+      const vals = Array.isArray(dbValues) ? dbValues : [];
+      const flags = [];
+      let clipCount = 0;
+      let maxPeakOut = 0;
+
+      for (let i=0;i<arr.length;i++){
+        const src = arr[i];
+        let peak = 0;
+        if (src && src.length){
+          for (let j=0;j<src.length;j++){
+            const d = Math.abs((src[j]|0) - 128);
+            if (d > peak) peak = d;
+          }
+        }
+        const gain = (typeof dbToLinearGain === 'function')
+          ? dbToLinearGain(vals[i] || 0)
+          : Math.pow(10, Number(vals[i]||0) / 20);
+        const outPeak = peak * (isFinite(gain) ? gain : 1);
+        const clipped = outPeak > 127.0001;
+        flags.push(clipped);
+        if (clipped) clipCount++;
+        if (outPeak > maxPeakOut) maxPeakOut = outPeak;
+      }
+
+      return { flags, clipCount, maxPeakOut };
+    }
+
+    function dpAmpSlotsLabel(slots){
+      const arr = Array.isArray(slots) ? slots.slice() : [];
+      if (!arr.length) return 'none';
+      const nums = arr.map(n=>(n|0)+1);
+      if (nums.length <= 6) return nums.join(', ');
+      return `${nums[0]}..${nums[nums.length-1]}`;
+    }
+
+    function dpDrawAmpPlanPreview(canvas, dbValues, clipFlags){
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width = Math.max(240, (canvas.clientWidth|0) || 420);
+      const h = canvas.height = 122;
+      const padX = 10;
+      const padY = 10;
+      const innerW = Math.max(1, w - padX*2);
+      const innerH = Math.max(1, h - padY*2);
+      const zeroY = Math.round(padY + innerH * 0.5);
+
+      const vals = Array.isArray(dbValues) ? dbValues : [];
+      const flags = Array.isArray(clipFlags) ? clipFlags : [];
+
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = '#10161d';
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.lineWidth = 1;
+      const guides = [-24, -12, 0, 12, 24];
+      function yForDb(db){
+        const norm = (24 - dpAmpClampDb(db, 0)) / 48;
+        return Math.round(padY + norm * innerH);
+      }
+      for (const g of guides){
+        const y = yForDb(g);
+        ctx.beginPath();
+        ctx.moveTo(padX, y + 0.5);
+        ctx.lineTo(w - padX, y + 0.5);
+        ctx.strokeStyle = (g === 0) ? 'rgba(122,167,255,0.45)' : 'rgba(255,255,255,0.08)';
+        ctx.stroke();
+      }
+
+      if (!vals.length){
+        ctx.fillStyle = 'rgba(230,237,243,0.65)';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('No preview targets', Math.round(w * 0.5), Math.round(h * 0.5));
+        return;
+      }
+
+      const count = vals.length;
+      for (let i=0;i<count;i++){
+        const x0 = Math.floor(padX + (i * innerW / count));
+        const x1 = Math.floor(padX + ((i + 1) * innerW / count)) - 1;
+        const bw = Math.max(1, x1 - x0 + 1);
+        const y = yForDb(vals[i]);
+        const top = Math.min(zeroY, y);
+        const barH = Math.max(1, Math.abs(y - zeroY));
+        const clipped = !!flags[i];
+        ctx.fillStyle = clipped
+          ? 'rgba(255, 110, 110, 0.90)'
+          : ((vals[i] || 0) >= 0)
+            ? 'rgba(122, 167, 255, 0.90)'
+            : 'rgba(111, 223, 182, 0.90)';
+        ctx.fillRect(x0, top, bw, barH);
+      }
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+    }
+
+    function doGainSeriesSlots(opts){
+      opts = opts || {};
+      const modeMeta = dpAmpModeMeta(opts.mode);
+      const resolved = dpResolveAmpTargets(opts.scope || 'auto');
+      const scope = resolved.scope;
+      const targets = resolved.targets || [];
+
+      if (!targets.length){
+        announceIO(scope === 'selected'
+          ? 'No selected waves to adjust amplitude.'
+          : 'No filled slots to adjust amplitude.', true);
+        return;
+      }
+
+      if (targets.length < modeMeta.minCount){
+        announceIO(`${modeMeta.label} needs ${modeMeta.minCount}+ target slot${modeMeta.minCount===1?'':'s'}.`, true);
+        return;
+      }
+
+      const dbPlan = dpAmpPlanValues(targets.length, opts);
+      if (!dbPlan.length){
+        announceIO('No AMP gain plan was generated.', true);
+        return;
+      }
+
+      const __bankBefore = captureBankState(targets, { preferEditor:true });
+      const editorSlot = EDIT.slot|0;
+      let activeTouched = false;
+      let minDb = Infinity;
+      let maxDb = -Infinity;
+      let applied = 0;
+
+      for (let i=0;i<targets.length;i++){
+        const s = targets[i];
+        const db = dpAmpClampDb(dbPlan[i], 0);
+        const gain = (typeof dbToLinearGain === 'function') ? dbToLinearGain(db) : Math.pow(10, db/20);
+
+        const isActive = (s === editorSlot);
+        const useEditor = isActive && LIB.dirty.has(s) && EDIT.dataU8 && EDIT.dataU8.length;
+        const libRec = LIB.waves[s] || null;
+        const srcU8 = useEditor ? EDIT.dataU8 : (libRec ? libRec.dataU8 : null);
+        if (!srcU8 || !srcU8.length) continue;
+
+        let canPreserveExtras = !useEditor;
+        if (!canPreserveExtras && libRec && libRec.dataU8 && libRec.dataU8.length === srcU8.length){
+          let same = true;
+          for (let j=0;j<srcU8.length;j++){
+            if (srcU8[j] !== libRec.dataU8[j]){ same = false; break; }
+          }
+          if (same) canPreserveExtras = true;
+        }
+
+        const outU8 = (typeof fxGainDbTo === 'function') ? fxGainDbTo(srcU8, db) : fxGainLinearTo(srcU8, gain*100);
+        const nm = useEditor ? (EDIT.name||'WAVE') : ((libRec && libRec.name) ? libRec.name : 'WAVE');
+        const heat = useEditor
+          ? ((typeof EDIT._dpHeat === 'number' && isFinite(EDIT._dpHeat) && EDIT._dpHeat > 0) ? EDIT._dpHeat : 1)
+          : (libRec ? dpHeatOf(libRec) : 1);
+
+        const rec = { name:nm, dataU8: outU8, user:true, _dpHeat: heat };
+
+        if (canPreserveExtras && libRec){
+          if (libRec._srcFloat && libRec._srcFloat.length && typeof applyGainToFloat === 'function'){
+            try{ rec._srcFloat = applyGainToFloat(libRec._srcFloat, gain); }catch(_){ }
+          }
+
+          if (libRec._tables6132 && libRec._tables6132.t0 && libRec._tables6132.t1 && libRec._tables6132.t2){
+            try{
+              if (typeof dpApplyHeatToTables === 'function') rec._tables6132 = dpApplyHeatToTables(libRec._tables6132, gain);
+              else {
+                const _scale = (arr)=>{
+                  const a = (arr instanceof Int16Array) ? arr : new Int16Array(arr||[]);
+                  const out = new Int16Array(a.length);
+                  for (let j=0;j<a.length;j++){
+                    let v = Math.round(a[j] * gain);
+                    if (v > 32767) v = 32767;
+                    else if (v < -32768) v = -32768;
+                    out[j] = v;
+                  }
+                  return out;
+                };
+                rec._tables6132 = {
+                  t0:_scale(libRec._tables6132.t0),
+                  t1:_scale(libRec._tables6132.t1),
+                  t2:_scale(libRec._tables6132.t2)
+                };
+              }
+            }catch(_){ }
+          }
+        }
+
+        LIB.waves[s] = attachDisplayRot(rec, false);
+        LIB.userWaves[s] = LIB.waves[s];
+        LIB.dirty.delete(s);
+        paintGridCell(s);
+        if (isActive) activeTouched = true;
+
+        if (db < minDb) minDb = db;
+        if (db > maxDb) maxDb = db;
+        applied++;
+      }
+
+      if (!applied){
+        announceIO('No target slots contained wave data to adjust.', true);
+        return;
+      }
+
+      if (activeTouched) dpLoadWaveIntoEditor(editorSlot);
+
+      const __bankAfter = captureBankState(targets);
+      bankPush({ label:`AMP ${modeMeta.shortLabel} ${scope === 'selected' ? 'SEL' : 'ALL'}`, before: __bankBefore, after: __bankAfter });
+      if (activeTouched) resetUndoToCurrent(true);
+
+      announceIO(`AMP ${modeMeta.shortLabel}: ${applied} slot${applied===1?'':'s'} (${dpAmpFormatDb(minDb)} -> ${dpAmpFormatDb(maxDb)}).`);
+      updateButtonsState();
+    }
+
+    async function dpPromptAmpShiftOptions(){
+      let seedDb = Number(gainAllSlider ? gainAllSlider.value : root.__digiproGainAllDb);
+      if (!isFinite(seedDb)) seedDb = 0;
+
+      const ST = root.__digiproAmpShiftState || (root.__digiproAmpShiftState = {
+        mode: 'ramp',
+        scope: 'auto',
+        exactDb: seedDb,
+        lowDb: Math.min(0, seedDb),
+        highDb: Math.max(0, seedDb),
+        curve: 'linear',
+        steps: 4,
+      });
+
+      ST.mode = dpAmpModeMeta(ST.mode).id;
+      ST.scope = (ST.scope === 'selected' || ST.scope === 'all') ? ST.scope : 'auto';
+      ST.exactDb = dpAmpClampDb(ST.exactDb, seedDb);
+      ST.lowDb = dpAmpClampDb(ST.lowDb, 0);
+      ST.highDb = dpAmpClampDb(ST.highDb, 0);
+      ST.curve = (String(ST.curve||'linear') === 'smooth') ? 'smooth' : 'linear';
+      ST.steps = _clampInt(parseInt(ST.steps,10)||4, 2, 12);
+
+      return await new Promise((resolve)=>{
+        const guard = el('div','mm-digi-guard');
+        const dlg = el('div','dlg');
+        guard.appendChild(dlg);
+
+        function close(val){
+          try{ guard.remove(); }catch(_){}
+          resolve(val || null);
+        }
+
+        guard.onclick = (e)=>{ if (e && e.target === guard) close(null); };
+        guard.onkeydown = (e)=>{ if (e && e.key === 'Escape') close(null); };
+        guard.tabIndex = -1;
+
+        const h = el('h4');
+        h.textContent = 'AMP tools';
+
+        const blurb = el('div','mm-small');
+        blurb.textContent = 'Design gain across the current AMP target set. Normal AMP uses the row slider; Shift+AMP adds slot-series shapes.';
+
+        const modeUi = dpBuildModeGroups(AMP_SHIFT_MODE_GROUPS, (id)=>{ ST.mode = dpAmpModeMeta(id).id; refresh(); });
+
+        const scopeRow = el('div','mm-digi-io mm-small');
+        scopeRow.style.flexWrap = 'wrap';
+        const scopeLbl = el('div');
+        scopeLbl.textContent = 'Scope:';
+        scopeLbl.style.minWidth = '52px';
+
+        function mkScopeBtn(id, label, tip){
+          const b = el('button');
+          b.textContent = label;
+          if (tip) b.title = tip;
+          b.onclick = ()=>{ ST.scope = id; refresh(); };
+          return b;
+        }
+        const bScopeAuto = mkScopeBtn('auto', 'Auto', 'Use selected slots if any are selected; otherwise use all filled slots.');
+        const bScopeSel  = mkScopeBtn('selected', 'Selected', 'Only selected slots that contain wave data.');
+        const bScopeAll  = mkScopeBtn('all', 'All filled', 'All filled slots, plus the dirty active slot when present.');
+        scopeRow.append(scopeLbl, bScopeAuto, bScopeSel, bScopeAll);
+
+        function makeDbSliderRow(labelText, getter, setter){
+          const row = el('div','mm-amp-slider');
+          const lbl = el('div','mm-small');
+          lbl.textContent = labelText;
+          lbl.style.minWidth = '72px';
+          const slider = el('input');
+          slider.type = 'range';
+          slider.min = '-24';
+          slider.max = '24';
+          slider.step = '0.5';
+          slider.value = String(dpAmpClampDb(getter(), 0));
+          const val = el('div','mm-small');
+          val.style.minWidth = '68px';
+          function sync(){
+            const db = dpAmpClampDb(slider.value, getter());
+            slider.value = String(db);
+            setter(db);
+            val.textContent = dpAmpFormatDb(db);
+          }
+          slider.oninput = ()=>{ sync(); refreshPreview(); };
+          slider.onchange = ()=>{ sync(); refreshPreview(); };
+          sync();
+          row.append(lbl, slider, val);
+          return row;
+        }
+
+        const exactRow = makeDbSliderRow('Trim', ()=>ST.exactDb, (v)=>{ ST.exactDb = v; });
+        const lowRow   = makeDbSliderRow('Low dB', ()=>ST.lowDb, (v)=>{ ST.lowDb = v; });
+        const highRow  = makeDbSliderRow('High dB', ()=>ST.highDb, (v)=>{ ST.highDb = v; });
+
+        const curveRow = el('div','mm-digi-io mm-small');
+        curveRow.style.marginTop = '6px';
+        const curveLbl = el('div');
+        curveLbl.textContent = 'Curve:';
+        curveLbl.style.minWidth = '52px';
+        const bCurveLinear = el('button'); bCurveLinear.textContent = 'Linear'; bCurveLinear.title = 'Even gain change per slot.';
+        const bCurveSmooth = el('button'); bCurveSmooth.textContent = 'Smooth'; bCurveSmooth.title = 'Gentler at the ends, stronger in the middle.';
+        bCurveLinear.onclick = ()=>{ ST.curve = 'linear'; refresh(); };
+        bCurveSmooth.onclick = ()=>{ ST.curve = 'smooth'; refresh(); };
+        curveRow.append(curveLbl, bCurveLinear, bCurveSmooth);
+
+        const stepsRow = el('div','mm-amp-slider');
+        stepsRow.style.marginTop = '6px';
+        const stepsLbl = el('div','mm-small');
+        stepsLbl.textContent = 'Bands';
+        stepsLbl.style.minWidth = '72px';
+        const stepsIn = el('input');
+        stepsIn.type = 'range';
+        stepsIn.min = '2';
+        stepsIn.max = '12';
+        stepsIn.step = '1';
+        stepsIn.value = String(ST.steps|0);
+        const stepsVal = el('div','mm-small');
+        stepsVal.style.minWidth = '68px';
+        function syncSteps(){
+          ST.steps = _clampInt(parseInt(stepsIn.value,10)||4, 2, 12);
+          stepsIn.value = String(ST.steps);
+          stepsVal.textContent = `${ST.steps}`;
+        }
+        stepsIn.oninput = ()=>{ syncSteps(); refreshPreview(); };
+        stepsIn.onchange = ()=>{ syncSteps(); refreshPreview(); };
+        syncSteps();
+        stepsRow.append(stepsLbl, stepsIn, stepsVal);
+
+        const note = el('div','mm-small');
+        note.className = 'mm-small mm-amp-note';
+
+        const previewWrap = el('div','mm-amp-preview');
+        const previewMeta = el('div','mm-amp-preview-meta mm-small');
+        const stats = el('div','mm-small');
+        const previewInfo = el('div','mm-small');
+        const previewCanvas = el('canvas');
+        previewWrap.append(previewMeta, previewCanvas);
+        previewMeta.append(stats, previewInfo);
+
+        function setActive(btn, on){ btn.classList.toggle('mm-mode-active', !!on); }
+
+        function refreshPreview(){
+          const meta = dpAmpModeMeta(ST.mode);
+          const prev = dpAmpPreviewTargets(ST.scope);
+          const slotCount = prev.slots.length|0;
+          const minCount = meta.minCount|0;
+          const ready = slotCount >= minCount;
+          const dbPlan = ready ? dpAmpPlanValues(slotCount, ST) : [];
+          const clip = dpAmpEstimateClipFlags(prev.waves, dbPlan);
+
+          stats.textContent = `Targets: ${slotCount} slot${slotCount===1?'':'s'} (${dpAmpSlotsLabel(prev.slots)})`;
+
+          if (!slotCount){
+            previewInfo.textContent = (ST.scope === 'selected')
+              ? 'Pick 1+ filled slot(s) first.'
+              : 'No filled slots available.';
+            note.textContent = 'Nothing to preview yet.';
+          } else if (!ready){
+            previewInfo.textContent = `${meta.label} needs ${minCount}+ target slots.`;
+            note.textContent = (meta.id === 'trim')
+              ? 'Exact trim always works for a single slot.'
+              : 'Choose Exact trim, add more selected slots, or switch Scope.';
+          } else {
+            let lo = Infinity, hi = -Infinity;
+            for (const db of dbPlan){
+              if (db < lo) lo = db;
+              if (db > hi) hi = db;
+            }
+            previewInfo.textContent = `Range: ${dpAmpFormatDb(lo)} -> ${dpAmpFormatDb(hi)} • clip risk: ${clip.clipCount}`;
+            if (meta.id === 'alternate'){
+              note.textContent = `Alt skew alternates around ${dpAmpFormatDb((ST.lowDb + ST.highDb) * 0.5)} while increasing depth.`;
+            } else if (meta.id === 'pingpong'){
+              note.textContent = 'Ping-pong mirrors the gain rise back down across the target span.';
+            } else if (meta.id === 'steps'){
+              note.textContent = `Stepped mode quantizes the ramp into ${ST.steps} gain band${ST.steps===1?'':'s'}.`;
+            } else {
+              note.textContent = 'Preview bars show planned dB per target slot. Red bars may clip.';
+            }
+          }
+
+          dpDrawAmpPlanPreview(previewCanvas, dbPlan, clip.flags);
+          return { slotCount, minCount };
+        }
+
+        function refresh(){
+          if (modeUi && typeof dpSetActiveInBtnPairs === 'function'){
+            dpSetActiveInBtnPairs(modeUi.btnPairs || [], ST.mode);
+          }
+
+          setActive(bScopeAuto, ST.scope === 'auto');
+          setActive(bScopeSel,  ST.scope === 'selected');
+          setActive(bScopeAll,  ST.scope === 'all');
+          setActive(bCurveLinear, ST.curve === 'linear');
+          setActive(bCurveSmooth, ST.curve === 'smooth');
+
+          exactRow.style.display = (ST.mode === 'trim') ? 'flex' : 'none';
+          lowRow.style.display   = (ST.mode === 'trim') ? 'none' : 'flex';
+          highRow.style.display  = (ST.mode === 'trim') ? 'none' : 'flex';
+          curveRow.style.display = (ST.mode === 'ramp' || ST.mode === 'steps' || ST.mode === 'pingpong' || ST.mode === 'alternate') ? 'flex' : 'none';
+          stepsRow.style.display = (ST.mode === 'steps') ? 'flex' : 'none';
+
+          const prevInfo = refreshPreview();
+          btnApply.disabled = !(prevInfo.slotCount >= prevInfo.minCount);
+        }
+
+        const footer = el('div','mm-digi-io');
+        footer.style.justifyContent = 'flex-end';
+        footer.style.gap = '8px';
+
+        const btnCancel = el('button');
+        btnCancel.textContent = 'Cancel';
+        btnCancel.onclick = ()=>close(null);
+
+        const btnApply = el('button');
+        btnApply.textContent = 'Apply';
+        btnApply.dataset.default = '1';
+        btnApply.onclick = ()=>{
+          ST.mode = dpAmpModeMeta(ST.mode).id;
+          ST.scope = (ST.scope === 'selected' || ST.scope === 'all') ? ST.scope : 'auto';
+          ST.exactDb = dpAmpClampDb(ST.exactDb, seedDb);
+          ST.lowDb = dpAmpClampDb(ST.lowDb, 0);
+          ST.highDb = dpAmpClampDb(ST.highDb, 0);
+          ST.curve = (String(ST.curve||'linear') === 'smooth') ? 'smooth' : 'linear';
+          ST.steps = _clampInt(parseInt(ST.steps,10)||4, 2, 12);
+
+          close({
+            mode: ST.mode,
+            scope: ST.scope,
+            exactDb: ST.exactDb,
+            lowDb: ST.lowDb,
+            highDb: ST.highDb,
+            curve: ST.curve,
+            steps: ST.steps|0,
+          });
+        };
+
+        footer.append(btnCancel, btnApply);
+
+        dlg.append(h, blurb);
+        if (modeUi && modeUi.node) dlg.appendChild(modeUi.node);
+        dlg.append(scopeRow, exactRow, lowRow, highRow, curveRow, stepsRow, note, previewWrap, footer);
+
+        document.body.appendChild(guard);
+        try{ guard.focus(); }catch(_){ }
+
+        refresh();
+      });
     }
 
     // --------------------------------------------------------------
@@ -7977,7 +8583,141 @@ ioMsgEl.textContent = 'Ready';
       { title: 'Logic', ids: ['xor','and','or'] },
     ];
 
+    function dpChainLabel(ids, labelFn, fallbackId){
+      const arr = Array.isArray(ids) ? ids : [ids];
+      const out = [];
+      for (const raw of arr){
+        const id = String(raw||'');
+        if (!id || out.includes(id)) continue;
+        out.push(id);
+      }
+      if (!out.length && fallbackId != null) out.push(String(fallbackId||''));
+      return out.map(id=>labelFn(id)).join(' -> ');
+    }
+
+    function dpSanitizeModeChain(ids, items, fallbackId, max=3){
+      const arr = Array.isArray(ids) ? ids : ((ids != null && ids !== '') ? [ids] : []);
+      const valid = new Set((Array.isArray(items) ? items : []).map(it=>String(it && it.id || '')));
+      const out = [];
+      const lim = Math.max(1, max|0);
+      for (const raw of arr){
+        const id = String(raw||'');
+        if (!id || !valid.has(id) || out.includes(id)) continue;
+        out.push(id);
+        if (out.length >= lim) break;
+      }
+      if (!out.length && fallbackId != null){
+        const fb = String(fallbackId||'');
+        if (!valid.size || valid.has(fb)) out.push(fb);
+      }
+      return out;
+    }
+
+    function dpGetStoredModeChain(state, arrayKey, singleKey, items, fallbackId, max=3){
+      const src = state ? state[arrayKey] : null;
+      const one = state ? state[singleKey] : null;
+      return dpSanitizeModeChain((Array.isArray(src) && src.length) ? src : one, items, fallbackId, max);
+    }
+
+    function dpSetStoredModeChain(state, arrayKey, singleKey, ids, items, fallbackId, max=3){
+      const chain = dpSanitizeModeChain(ids, items, fallbackId, max);
+      if (state){
+        state[arrayKey] = chain.slice();
+        state[singleKey] = chain[0] || String(fallbackId||'');
+      }
+      return chain;
+    }
+
+    function dpPickStoredModeChain(state, arrayKey, singleKey, items, fallbackId, id, ev, max=3){
+      const cur = dpGetStoredModeChain(state, arrayKey, singleKey, items, fallbackId, max);
+      const pickId = String(id||'');
+      const additive = !!(ev && (ev.metaKey || ev.ctrlKey));
+      let next;
+      if (!additive){
+        next = [pickId];
+      } else {
+        next = cur.slice();
+        const idx = next.indexOf(pickId);
+        if (idx >= 0){
+          if (next.length > 1) next.splice(idx, 1);
+        } else if (next.length < Math.max(1, max|0)){
+          next.push(pickId);
+        } else {
+          try{ announceIO(`Chain limit: ${Math.max(1, max|0)} step${(Math.max(1, max|0)===1)?'':'s'}.`, true); }catch(_){ }
+        }
+      }
+      return dpSetStoredModeChain(state, arrayKey, singleKey, next, items, fallbackId, max);
+    }
+
+    function dpMoveStoredModeChain(state, arrayKey, singleKey, items, fallbackId, idx, dir, max=3){
+      const cur = dpGetStoredModeChain(state, arrayKey, singleKey, items, fallbackId, max);
+      const from = idx|0;
+      const to = from + (dir|0);
+      if (from < 0 || from >= cur.length || to < 0 || to >= cur.length || from === to) return cur;
+      const next = cur.slice();
+      const tmp = next[from];
+      next[from] = next[to];
+      next[to] = tmp;
+      return dpSetStoredModeChain(state, arrayKey, singleKey, next, items, fallbackId, max);
+    }
+
+    function dpRemoveStoredModeChainStep(state, arrayKey, singleKey, items, fallbackId, idx, max=3){
+      const cur = dpGetStoredModeChain(state, arrayKey, singleKey, items, fallbackId, max);
+      if (cur.length <= 1) return cur;
+      const next = cur.slice();
+      next.splice(idx|0, 1);
+      return dpSetStoredModeChain(state, arrayKey, singleKey, next, items, fallbackId, max);
+    }
+
+    function dpBuildModeChainEditor(opts){
+      const o = opts || {};
+      const wrap = el('div','mm-modechain');
+      const title = el('div','mm-modegroup-title');
+      title.textContent = String(o.title || 'Chain');
+      const list = el('div','mm-modechain-list');
+      wrap.append(title, list);
+
+      function mkCtl(label, tip, onClick){
+        const b = el('button','mm-modechain-btn');
+        b.type = 'button';
+        b.textContent = label;
+        if (tip) b.title = tip;
+        b.onclick = (ev)=>{
+          try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ }
+          try{ onClick && onClick(); }catch(_){ }
+        };
+        return b;
+      }
+
+      function render(ids){
+        list.replaceChildren();
+        const chain = Array.isArray(ids) ? ids.slice() : [];
+        if (!chain.length) return;
+
+        chain.forEach((id, idx)=>{
+          const item = el('div','mm-modechain-item');
+          const n = el('div','mm-modechain-index');
+          n.textContent = String(idx + 1);
+          const label = el('div','mm-modechain-label');
+          label.textContent = o.labelFn ? o.labelFn(id) : String(id||'');
+          const ctrls = el('div','mm-modechain-controls');
+          const bLeft = mkCtl('←', 'Move left', ()=>{ if (o.onMove) o.onMove(idx, -1); });
+          const bRight = mkCtl('→', 'Move right', ()=>{ if (o.onMove) o.onMove(idx, 1); });
+          const bRemove = mkCtl('Remove', 'Remove step', ()=>{ if (o.onRemove) o.onRemove(idx); });
+          bLeft.disabled = idx === 0;
+          bRight.disabled = idx === (chain.length - 1);
+          bRemove.disabled = chain.length <= 1;
+          ctrls.append(bLeft, bRight, bRemove);
+          item.append(n, label, ctrls);
+          list.append(item);
+        });
+      }
+
+      return { node: wrap, render };
+    }
+
     function dpEvolveRecipeLabel(id){
+      if (Array.isArray(id)) return dpChainLabel(id, dpEvolveRecipeLabel, 'seeded');
       const r = EVOLVE_RECIPES.find(x=>x.id===id);
       return r ? r.label : String(id||'seeded');
     }
@@ -7988,7 +8728,8 @@ ioMsgEl.textContent = 'Ready';
       // Allow any integer length (2..64) instead of only 4/8/16/32/48/64.
       const count = _clampInt((EVOLVE_STATE.count|0) || 16, 2, 64);
 
-      const recipe = EVOLVE_STATE.recipe || 'seeded';
+      const recipes = dpGetStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', EVOLVE_RECIPES, 'seeded', 3);
+      const recipe = recipes[0] || 'seeded';
 
       // Scan-path / ordering presets (helps build “musical” scan tables, e.g. ping‑pong).
       const pathId = EVOLVE_STATE.path || 'oneway';
@@ -8027,7 +8768,7 @@ ioMsgEl.textContent = 'Ready';
         ? '\n\nFill gaps: With 5+ selected waves, click Evolve to fill the gaps between the selected anchor slots (anchors are not overwritten).'
         : '';
 
-      const modeLine = `Recipe: ${dpEvolveRecipeLabel(recipe)} • Path: ${pathLabel}${pwmLabel ? (' • ' + pwmLabel) : ''}`;
+      const modeLine = `Recipe: ${dpEvolveRecipeLabel(recipes)} • Path: ${pathLabel}${pwmLabel ? (' • ' + pwmLabel) : ''}`;
 
       btnEvolve.title = `Generate ${count-1} new waves using the active slot as the seed (overwrites the next ${count-1} slots, within the 64-slot bank). ${modeLine}. Shift-click to change options.${dualHint}${triHint}${quadHint}${keyHint}`;
     }
@@ -8125,7 +8866,7 @@ ioMsgEl.textContent = 'Ready';
           const b = el('button');
           b.textContent = it.label || String(it.id||'');
           if (it.desc) b.title = it.desc;
-          b.onclick = ()=>{ try{ onPick && onPick(it.id); }catch(_){ /* ignore */ } };
+          b.onclick = (ev)=>{ try{ onPick && onPick(it.id, ev); }catch(_){ /* ignore */ } };
           btnPairs.push({ id: it.id, btn: b });
           grid.append(b);
         }
@@ -8139,10 +8880,11 @@ ioMsgEl.textContent = 'Ready';
 
     function dpSetActiveInBtnPairs(btnPairs, activeId){
       const arr = Array.isArray(btnPairs) ? btnPairs : [];
-      const id = String(activeId||'');
+      const ids = Array.isArray(activeId) ? activeId.map(v=>String(v||'')) : [String(activeId||'')];
+      const idSet = new Set(ids.filter(Boolean));
       for (const p of arr){
         if (!p || !p.btn) continue;
-        p.btn.classList.toggle('mm-mode-active', String(p.id) === id);
+        p.btn.classList.toggle('mm-mode-active', idSet.has(String(p.id)));
       }
     }
 
@@ -8156,7 +8898,7 @@ ioMsgEl.textContent = 'Ready';
 
         // Sanitize persisted state (back-compat with older saves that only had count/recipe).
         EVOLVE_STATE.count = _clampInt((EVOLVE_STATE.count|0) || 16, 2, 64);
-        EVOLVE_STATE.recipe = EVOLVE_STATE.recipe || 'seeded';
+        dpSetStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', EVOLVE_STATE.recipes || EVOLVE_STATE.recipe || 'seeded', EVOLVE_RECIPES, 'seeded', 3);
         EVOLVE_STATE.path = EVOLVE_STATE.path || 'oneway';
         EVOLVE_STATE.pwmDomain = (EVOLVE_STATE.pwmDomain === 'full') ? 'full' : 'half';
 
@@ -8240,11 +8982,26 @@ ioMsgEl.textContent = 'Ready';
           : [{ title:'', items: EVOLVE_RECIPES }];
 
         const recUI = (typeof dpBuildModeGroups === 'function')
-          ? dpBuildModeGroups(recipeGroups, (id)=>{ EVOLVE_STATE.recipe = String(id||'seeded'); refresh(); })
-          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_RECIPES||[]).forEach(r=>{ const b=el('button'); b.textContent=r.label; if (r.desc) b.title=r.desc; b.onclick=()=>{ EVOLVE_STATE.recipe=r.id; refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
+          ? dpBuildModeGroups(recipeGroups, (id, ev)=>{
+              dpPickStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', EVOLVE_RECIPES, 'seeded', id, ev, 3);
+              refresh();
+            })
+          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_RECIPES||[]).forEach(r=>{ const b=el('button'); b.textContent=r.label; if (r.desc) b.title=r.desc; b.onclick=(ev)=>{ dpPickStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', EVOLVE_RECIPES, 'seeded', r.id, ev, 3); refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
 
         const rowRec = recUI.node;
         const recBtnPairs = recUI.btnPairs;
+        const chainUI = dpBuildModeChainEditor({
+          title: 'Sequence',
+          labelFn: (id)=>dpEvolveRecipeLabel(id),
+          onMove: (idx, dir)=>{
+            dpMoveStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', EVOLVE_RECIPES, 'seeded', idx, dir, 3);
+            refresh();
+          },
+          onRemove: (idx)=>{
+            dpRemoveStoredModeChainStep(EVOLVE_STATE, 'recipes', 'recipe', EVOLVE_RECIPES, 'seeded', idx, 3);
+            refresh();
+          },
+        });
 
         const preview = el('div'); preview.className = 'mm-small';
         preview.style.opacity = '0.9';
@@ -8293,12 +9050,15 @@ ioMsgEl.textContent = 'Ready';
           });
 
           // Scan-path buttons
-          const recipe = String(EVOLVE_STATE.recipe || 'seeded');
+          const recipes = dpGetStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', EVOLVE_RECIPES, 'seeded', 3);
+          const recipe = String(recipes[0] || 'seeded');
           const pathId = String(EVOLVE_STATE.path || 'oneway');
 
-          // “Alt skew” only appears for recipes that opt-in.
-          const rMeta = (EVOLVE_RECIPES||[]).find(r=>r && r.id === recipe) || null;
-          const altOk = !!(rMeta && rMeta.altSkew);
+          // “Alt skew” only appears when every chain step supports it.
+          const altOk = recipes.length > 0 && recipes.every(id=>{
+            const rMeta = (EVOLVE_RECIPES||[]).find(r=>r && r.id === id) || null;
+            return !!(rMeta && rMeta.altSkew);
+          });
           bPathAlt.style.display = altOk ? '' : 'none';
           if (!altOk && pathId === 'alternate') EVOLVE_STATE.path = 'oneway';
 
@@ -8307,9 +9067,9 @@ ioMsgEl.textContent = 'Ready';
           setActive(bPathAlt,  EVOLVE_STATE.path === 'alternate');
 
           // PWM domain row only when PWM recipe, and not in Alt mode (Alt implies full domain).
-          const pwmOnly = (recipe === 'pwm');
-          rowPwmDomain.style.display = pwmOnly ? '' : 'none';
-          if (pwmOnly){
+          const hasPwm = recipes.includes('pwm');
+          rowPwmDomain.style.display = hasPwm ? '' : 'none';
+          if (hasPwm){
             const dom = (EVOLVE_STATE.pwmDomain === 'full') ? 'full' : 'half';
             // In Alt mode we force full scan behavior.
             const lockFull = (EVOLVE_STATE.path === 'alternate');
@@ -8333,8 +9093,9 @@ ioMsgEl.textContent = 'Ready';
 
           // Recipe buttons (group UI)
           if (typeof dpSetActiveInBtnPairs === 'function'){
-            dpSetActiveInBtnPairs(recBtnPairs, EVOLVE_STATE.recipe);
+            dpSetActiveInBtnPairs(recBtnPairs, recipes);
           }
+          chainUI.render(recipes);
 
           // Preview + run enable
           const count = EVOLVE_STATE.count|0;
@@ -8346,10 +9107,10 @@ ioMsgEl.textContent = 'Ready';
             const overwriteEndNo = seedSlot + count;
             const pathLabel = (EVOLVE_STATE.path === 'pingpong') ? 'Ping‑pong' : (EVOLVE_STATE.path === 'alternate' ? 'Alt skew' : 'One‑way');
             const dom = (EVOLVE_STATE.pwmDomain === 'full') ? 'full' : 'half';
-            const domNote = (recipe === 'pwm')
+            const domNote = hasPwm
               ? (EVOLVE_STATE.path === 'alternate') ? ' (PWM full, alternating ±)' : (dom === 'full' ? ' (PWM full 0→1)' : ' (PWM one‑sided 0.5→1)')
               : '';
-            preview.textContent = `Will overwrite slots ${overwriteStartNo}..${overwriteEndNo} with ${count-1} new wave(s). Path: ${pathLabel}${domNote}. Recipe: ${dpEvolveRecipeLabel(EVOLVE_STATE.recipe)}.`;
+            preview.textContent = `Will overwrite slots ${overwriteStartNo}..${overwriteEndNo} with ${count-1} new wave(s). Path: ${pathLabel}${domNote}. Recipe: ${dpEvolveRecipeLabel(recipes)}.`;
             bRun.disabled = false;
           }
         }
@@ -8395,9 +9156,11 @@ ioMsgEl.textContent = 'Ready';
 
         bCancel.onclick = ()=>finish(null);
         bRun.onclick = ()=>{
+          const recipes = dpGetStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', EVOLVE_RECIPES, 'seeded', 3);
           finish({
             count: EVOLVE_STATE.count|0,
-            recipe: EVOLVE_STATE.recipe,
+            recipe: recipes[0] || 'seeded',
+            recipes,
             path: EVOLVE_STATE.path || 'oneway',
             pwmDomain: (EVOLVE_STATE.pwmDomain === 'full') ? 'full' : 'half',
           });
@@ -8415,7 +9178,7 @@ ioMsgEl.textContent = 'Ready';
         dlg.append(lblCount1, rowCountPresets, lblCount2, rowCountInputs, el('hr'), lblPath, rowPath);
 
         // PWM domain + note (only shown when PWM)
-        dlg.append(lblPwm, rowPwmDomain, note, el('hr'), lblRec, rowRec, el('hr'), preview, el('hr'), rowBtns);
+        dlg.append(lblPwm, rowPwmDomain, note, el('hr'), lblRec, rowRec, chainUI.node, el('hr'), preview, el('hr'), rowBtns);
 
         overlay.append(dlg);
         document.body.append(overlay);
@@ -8430,12 +9193,39 @@ ioMsgEl.textContent = 'Ready';
 
 
 
+function dpEvolveRecipeSupportsAlt(id){
+      const r = (EVOLVE_RECIPES||[]).find(x=>x && x.id === String(id||''));
+      return !!(r && r.altSkew);
+    }
+
+function dpApplyEvolveRecipeChain(baseU8, tBase, recipeIds, pathId, pwmDomain){
+      const ids = dpSanitizeModeChain(recipeIds, EVOLVE_RECIPES, 'seeded', 3);
+      const chainAltOk = ids.length > 0 && ids.every(id=>dpEvolveRecipeSupportsAlt(id));
+      const path = (String(pathId||'oneway') === 'alternate' && chainAltOk) ? 'alternate' : String(pathId||'oneway');
+      const dom = (String(pwmDomain||'half') === 'full') ? 'full' : 'half';
+      let cur = new Uint8Array(baseU8 || []);
+      for (const id of ids){
+        let t = Number(tBase||0);
+        if (id === 'pwm' && path !== 'alternate'){
+          t = (dom === 'full') ? _clamp01(t) : (0.5 + 0.5 * _clamp01(t));
+        } else {
+          t = _clamp01(t);
+        }
+        cur = (path === 'alternate' && dpEvolveRecipeSupportsAlt(id))
+          ? dpEvolveGenerate(cur, t, id, { altSkew:true })
+          : dpEvolveGenerate(cur, t, id);
+      }
+      return cur;
+    }
+
 function doEvolveFromSlot(opts){
       // Optional one-shot override (e.g. from Shift-click menu)
       if (opts && typeof opts === 'object'){
         const c = (opts.count|0);
         if (c) EVOLVE_STATE.count = _clampInt(c, 2, 64);
-        if (opts.recipe) EVOLVE_STATE.recipe = String(opts.recipe);
+        if (opts.recipes || opts.recipe){
+          dpSetStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', opts.recipes || opts.recipe, EVOLVE_RECIPES, 'seeded', 3);
+        }
         if (opts.path) EVOLVE_STATE.path = String(opts.path);
         if (opts.pwmDomain) EVOLVE_STATE.pwmDomain = (String(opts.pwmDomain) === 'full') ? 'full' : 'half';
         try{ dpUpdateEvolveBtnTitle(); }catch(_){ /* ignore */ }
@@ -8443,13 +9233,13 @@ function doEvolveFromSlot(opts){
 
       // Allow any integer length (2..64). Clamp later to the remaining bank space from the seed slot.
       const requestedCount = _clampInt((EVOLVE_STATE.count|0) || 16, 2, 64);
-      const recipe = EVOLVE_STATE.recipe || 'seeded';
+      const recipes = dpGetStoredModeChain(EVOLVE_STATE, 'recipes', 'recipe', EVOLVE_RECIPES, 'seeded', 3);
+      const recipe = recipes[0] || 'seeded';
       const pathId = EVOLVE_STATE.path || 'oneway';
       const pwmDomain = (EVOLVE_STATE.pwmDomain === 'full') ? 'full' : 'half';
 
-      // “Alt skew” is only valid for recipes that explicitly opt-in.
-      const _rMeta = (EVOLVE_RECIPES||[]).find(r=>r && r.id===recipe) || null;
-      const _altOk = !!(_rMeta && _rMeta.altSkew);
+      // “Alt skew” is only valid when every chained recipe opts in.
+      const _altOk = recipes.length > 0 && recipes.every(id=>dpEvolveRecipeSupportsAlt(id));
       const _path = (pathId === 'alternate' && !_altOk) ? 'oneway' : pathId;
 
       // Seed slot = active tile (preferred), fallback to editor slot.
@@ -8489,7 +9279,7 @@ function doEvolveFromSlot(opts){
         : (_path === 'alternate') ? 'Alt skew'
         : 'One‑way';
 
-      const pwmShort = (recipe === 'pwm')
+      const pwmShort = recipes.includes('pwm')
         ? ((_path === 'alternate') ? 'PWM alt ±'
           : (pwmDomain === 'full') ? 'PWM full'
           : 'PWM one‑sided')
@@ -8500,7 +9290,7 @@ function doEvolveFromSlot(opts){
         : '';
 
       const ok = confirm(
-        `Evolve (${dpEvolveRecipeLabel(recipe)}) will overwrite slots ${overwriteStartNo}..${overwriteEndNo} with ${count-1} new waves. ` +
+        `Evolve (${dpEvolveRecipeLabel(recipes)}) will overwrite slots ${overwriteStartNo}..${overwriteEndNo} with ${count-1} new waves. ` +
         `Slot ${seedNo} is left unchanged.\n\nPath: ${pathLabel}${pwmShort ? (' • ' + pwmShort) : ''}.\n\nContinue?${note}`
       );
       if (!ok) return;
@@ -8525,9 +9315,6 @@ function doEvolveFromSlot(opts){
       }
 
       try{
-        // One shared opts object (avoids per-slot allocations)
-        const evolveOpts = (_path === 'alternate' && _altOk) ? { altSkew:true } : null;
-
         for (let i=0;i<targets.length;i++){
           const s = targets[i];
 
@@ -8552,27 +9339,13 @@ function doEvolveFromSlot(opts){
             t = (targets.length<=1) ? 1 : ((i+1) / targets.length);
           }
 
-          // PWM recipe note:
-          // dpEvolveGenerate('pwm') treats `t` as a *scan position* where ~0.5 is the
-          // "neutral" (no-warp) point. Historically, single‑wave Evolve used only
-          // 0.5→1.0 so the series stays one-direction (no mid-series mirror).
-          if (recipe === 'pwm' && !(_path === 'alternate')){
-            if (pwmDomain === 'full'){
-              // Use the full scan domain (0→1): crosses neutral (t≈0.5) and reaches the opposite skew.
-              t = _clamp01(t);
-            } else {
-              // One‑sided (default): map 0..1 into 0.5..1.0 (neutral → one direction).
-              t = 0.5 + 0.5 * _clamp01(t);
-            }
-          }
-
-          const out = evolveOpts ? dpEvolveGenerate(base, t, recipe, evolveOpts) : dpEvolveGenerate(base, t, recipe);
+          const out = dpApplyEvolveRecipeChain(base, t, recipes, _path, pwmDomain);
 
           // Name policy:
           //  - Default: 2-char prefix from seed + 2-digit global slot number.
           //  - Special-case (Unison + count=4): use seed's first 3 chars + (2/3/4) so you get e.g. WHI2/WHI3/WHI4.
           let nm;
-          if (recipe === 'unison' && requestedCount === 4){
+          if (recipes.length === 1 && recipe === 'unison' && requestedCount === 4){
             const base3 = fileToken4(baseName).slice(0,3).padEnd(3,'0');
             const digit = String(2 + i).slice(-1);
             nm = (base3 + digit).slice(0,4).padEnd(4,'0');
@@ -8604,14 +9377,14 @@ function doEvolveFromSlot(opts){
       const __bankAfter = captureBankState(targets);
 
       const labelBits = [
-        recipe,
+        dpEvolveRecipeLabel(recipes),
         (_path === 'pingpong') ? 'pingpong' : (_path === 'alternate') ? 'alt' : 'oneway'
       ];
-      if (recipe === 'pwm') labelBits.push((_path === 'alternate') ? 'full' : pwmDomain);
+      if (recipes.includes('pwm')) labelBits.push((_path === 'alternate') ? 'full' : pwmDomain);
 
       bankPush({ label:`Evolve →${count} @${seedNo} (${labelBits.join(',')})`, before: __bankBefore, after: __bankAfter });
 
-      announceIO(`Evolved slot ${seedNo} into ${count-1} new wave${count-1===1?'':'s'} (slots ${overwriteStartNo}..${overwriteEndNo}).`);
+      announceIO(`Evolved slot ${seedNo} into ${count-1} new wave${count-1===1?'':'s'} (slots ${overwriteStartNo}..${overwriteEndNo}, ${dpEvolveRecipeLabel(recipes)}).`);
       updateButtonsState();
     }
 
@@ -8648,8 +9421,32 @@ function doEvolveFromSlot(opts){
     ];
 
     function dpEvolveDualModeLabel(id){
+      if (Array.isArray(id)) return dpChainLabel(id, dpEvolveDualModeLabel, 'specblur');
       const m = EVOLVE_DUAL_MODES.find(x=>x.id===id);
       return m ? m.label : String(id||'specblur');
+    }
+
+    function dpApplyMorphModeChain(aU8, bU8, t, modeIds){
+      const ids = dpSanitizeModeChain(modeIds, EVOLVE_DUAL_MODES, 'specblur', 3);
+      const tt = _clamp01(t);
+      const pmMax = 0.18;
+      let curA = aU8;
+      let out = null;
+      for (const id of ids){
+        if (id === 'pm'){
+          if (typeof dpPhaseModGenerate !== 'function'){
+            out = dpMorphGenerate(curA, bU8, tt, 'xfade');
+          } else {
+            const base = dpMorphGenerate(curA, bU8, tt, 'xfade');
+            const depth = pmMax * 4 * tt * (1 - tt);
+            out = dpPhaseModGenerate(base, bU8, depth);
+          }
+        } else {
+          out = dpMorphGenerate(curA, bU8, tt, id);
+        }
+        curA = out;
+      }
+      return out || dpMorphGenerate(aU8, bU8, tt, 'xfade');
     }
 
     function dpSelectedTwoWaveSlots(){
@@ -8738,7 +9535,7 @@ function doEvolveFromSlot(opts){
 
         // sanitize persisted state
         EVOLVE_DUAL_STATE.count = _clampInt((EVOLVE_DUAL_STATE.count|0) || 16, 2, 64);
-        EVOLVE_DUAL_STATE.mode = EVOLVE_DUAL_STATE.mode || 'specblur';
+        dpSetStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_STATE.modes || EVOLVE_DUAL_STATE.mode || 'specblur', EVOLVE_DUAL_MODES, 'specblur', 3);
         EVOLVE_DUAL_STATE.placement = (EVOLVE_DUAL_STATE.placement === 'between') ? 'between' : 'afterA';
 
         const overlay = el('div','mm-digi-guard');
@@ -8777,11 +9574,26 @@ function doEvolveFromSlot(opts){
           : [{ title:'', items: EVOLVE_DUAL_MODES }];
 
         const modeUI = (typeof dpBuildModeGroups === 'function')
-          ? dpBuildModeGroups(modeGroups, (id)=>{ EVOLVE_DUAL_STATE.mode = String(id||'specblur'); refresh(); })
-          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_DUAL_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=()=>{ EVOLVE_DUAL_STATE.mode=m.id; refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
+          ? dpBuildModeGroups(modeGroups, (id, ev)=>{
+              dpPickStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', id, ev, 3);
+              refresh();
+            })
+          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_DUAL_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=(ev)=>{ dpPickStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', m.id, ev, 3); refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
 
         const rowMode = modeUI.node;
         const modeBtnPairs = modeUI.btnPairs;
+        const chainUI = dpBuildModeChainEditor({
+          title: 'Sequence',
+          labelFn: (id)=>dpEvolveDualModeLabel(id),
+          onMove: (idx, dir)=>{
+            dpMoveStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', idx, dir, 3);
+            refresh();
+          },
+          onRemove: (idx)=>{
+            dpRemoveStoredModeChainStep(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', idx, 3);
+            refresh();
+          },
+        });
 
         const preview = el('div'); preview.className='mm-small';
         preview.style.opacity = '0.9';
@@ -8827,9 +9639,11 @@ function doEvolveFromSlot(opts){
           });
 
           // mode buttons
+          const modes = dpGetStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', 3);
           if (typeof dpSetActiveInBtnPairs === 'function'){
-            dpSetActiveInBtnPairs(modeBtnPairs, EVOLVE_DUAL_STATE.mode);
+            dpSetActiveInBtnPairs(modeBtnPairs, modes);
           }
+          chainUI.render(modes);
 
           // preview overwrite + run enable
           if (EVOLVE_DUAL_STATE.placement === 'between'){
@@ -8839,7 +9653,7 @@ function doEvolveFromSlot(opts){
             } else {
               const lo = Math.min(aSlot,bSlot)+1;
               const hi = Math.max(aSlot,bSlot)-1;
-              preview.textContent = `Will overwrite slot(s) ${lo+1}..${hi+1} (${gap} step${gap===1?'':'s'}) using mode: ${dpEvolveDualModeLabel(EVOLVE_DUAL_STATE.mode)}.`;
+              preview.textContent = `Will overwrite slot(s) ${lo+1}..${hi+1} (${gap} step${gap===1?'':'s'}) using mode: ${dpEvolveDualModeLabel(modes)}.`;
               bRun.disabled = false;
             }
           } else {
@@ -8858,7 +9672,7 @@ function doEvolveFromSlot(opts){
               const warn = overlap.length
                 ? ` Warning: anchor slot ${overlap.join(', ')} will also be overwritten in this placement.`
                 : '';
-              preview.textContent = `Will overwrite slots ${start}..${end}${note} using mode: ${dpEvolveDualModeLabel(EVOLVE_DUAL_STATE.mode)}.${warn}`;
+              preview.textContent = `Will overwrite slots ${start}..${end}${note} using mode: ${dpEvolveDualModeLabel(modes)}.${warn}`;
               bRun.disabled = false;
             }
           }
@@ -8873,12 +9687,14 @@ function doEvolveFromSlot(opts){
 
         bCancel.onclick = ()=>{ overlay.remove(); resolve(null); };
         bRun.onclick = ()=>{
+          const modes = dpGetStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', 3);
           overlay.remove();
           resolve({
             aSlot, bSlot,
             placement: (EVOLVE_DUAL_STATE.placement==='between') ? 'between' : 'afterA',
             count: EVOLVE_DUAL_STATE.count|0,
-            mode: EVOLVE_DUAL_STATE.mode || 'specblur',
+            mode: modes[0] || 'specblur',
+            modes,
           });
         };
 
@@ -8887,7 +9703,7 @@ function doEvolveFromSlot(opts){
         const l1 = el('div','mm-small'); l1.textContent='Placement:';
         const l2 = el('div','mm-small'); l2.textContent='Slot count (Write after A):';
         const l3 = el('div','mm-small'); l3.textContent='Morph mode:';
-        dlg.append(l1, rowPlace, l2, rowCount, rowCountIn, l3, rowMode, el('hr'), preview, el('hr'), rowBtns);
+        dlg.append(l1, rowPlace, l2, rowCount, rowCountIn, l3, rowMode, chainUI.node, el('hr'), preview, el('hr'), rowBtns);
 
         overlay.append(dlg);
         document.body.append(overlay);
@@ -8911,12 +9727,10 @@ function doEvolveFromSlot(opts){
         return;
       }
 
-      const mode = String(opts.mode || EVOLVE_DUAL_STATE.mode || 'specblur');
+      const modes = dpSanitizeModeChain(opts.modes || opts.mode || EVOLVE_DUAL_STATE.modes || EVOLVE_DUAL_STATE.mode, EVOLVE_DUAL_MODES, 'specblur', 3);
+      const mode = modes[0] || 'specblur';
       const placement = (opts.placement === 'between') ? 'between' : 'afterA';
       const requestedCount = _clampInt((opts.count|0) || (EVOLVE_DUAL_STATE.count|0) || 16, 2, 64);
-
-      const isPM = (mode === 'pm');
-      const pmMax = 0.18; // max phase deviation (cycles) for FM/PM Boost
 
       // Determine overwrite targets
       const targets = [];
@@ -8944,7 +9758,7 @@ Note: Only ${count} slot(s) remain from slot ${aSlot+1}, so this will fill up to
       // Confirm overwrite
       const aName = (aRec.name||'WAVE');
       const bName = (bRec.name||'WAVE');
-      const label = dpEvolveDualModeLabel(mode);
+      const label = dpEvolveDualModeLabel(modes);
       let msg;
 
       if (placement === 'between'){
@@ -8987,15 +9801,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const dist = Math.abs(s - aSlot);
             const t = (totalSteps>0) ? (dist / totalSteps) : 1;
 
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              const base = dpMorphGenerate(aRec.dataU8, bRec.dataU8, t, 'xfade');
-              const depth = pmMax * 4 * t * (1 - t);
-              morphed = dpPhaseModGenerate(base, bRec.dataU8, depth);
-            } else {
-              morphed = dpMorphGenerate(aRec.dataU8, bRec.dataU8, t, (isPM ? 'xfade' : mode));
-            }
-            const out = morphed;
+            const out = dpApplyMorphModeChain(aRec.dataU8, bRec.dataU8, t, modes);
 
             const num2 = String(s+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
@@ -9011,15 +9817,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const s = targets[i]|0;
             const t = (n<=1) ? 1 : ((i+1) / n);
 
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              const base = dpMorphGenerate(aRec.dataU8, bRec.dataU8, t, 'xfade');
-              const depth = pmMax * 4 * t * (1 - t);
-              morphed = dpPhaseModGenerate(base, bRec.dataU8, depth);
-            } else {
-              morphed = dpMorphGenerate(aRec.dataU8, bRec.dataU8, t, (isPM ? 'xfade' : mode));
-            }
-            const out = morphed;
+            const out = dpApplyMorphModeChain(aRec.dataU8, bRec.dataU8, t, modes);
 
             const num2 = String(s+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
@@ -9047,9 +9845,9 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
       }
 
       const __bankAfter = captureBankState(targets);
-      bankPush({ label:`Morph ${aSlot+1}→${bSlot+1} (${mode})`, before: __bankBefore, after: __bankAfter });
+      bankPush({ label:`Morph ${aSlot+1}→${bSlot+1} (${dpEvolveDualModeLabel(modes)})`, before: __bankBefore, after: __bankAfter });
 
-      announceIO(`Morphed A(${aSlot+1}) → B(${bSlot+1}) into ${targets.length} slot${targets.length===1?'':'s'} (${dpEvolveDualModeLabel(mode)}).`);
+      announceIO(`Morphed A(${aSlot+1}) → B(${bSlot+1}) into ${targets.length} slot${targets.length===1?'':'s'} (${dpEvolveDualModeLabel(modes)}).`);
       updateButtonsState();
     }
 
@@ -9065,7 +9863,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
 
         // sanitize persisted state
         EVOLVE_TRIPLE_STATE.count = _clampInt((EVOLVE_TRIPLE_STATE.count|0) || 16, 2, 64);
-        EVOLVE_TRIPLE_STATE.mode = EVOLVE_TRIPLE_STATE.mode || 'specblur';
+        dpSetStoredModeChain(EVOLVE_TRIPLE_STATE, 'modes', 'mode', EVOLVE_TRIPLE_STATE.modes || EVOLVE_TRIPLE_STATE.mode || 'specblur', EVOLVE_DUAL_MODES, 'specblur', 3);
         EVOLVE_TRIPLE_STATE.placement = (EVOLVE_TRIPLE_STATE.placement === 'between') ? 'between' : 'afterA';
 
         const overlay = el('div','mm-digi-guard');
@@ -9106,11 +9904,17 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
           : [{ title:'', items: EVOLVE_DUAL_MODES }];
 
         const modeUI = (typeof dpBuildModeGroups === 'function')
-          ? dpBuildModeGroups(modeGroups, (id)=>{ EVOLVE_TRIPLE_STATE.mode = String(id||'specblur'); refresh(); })
-          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_DUAL_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=()=>{ EVOLVE_TRIPLE_STATE.mode=m.id; refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
+          ? dpBuildModeGroups(modeGroups, (id, ev)=>{ dpPickStoredModeChain(EVOLVE_TRIPLE_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', id, ev, 3); refresh(); })
+          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_DUAL_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=(ev)=>{ dpPickStoredModeChain(EVOLVE_TRIPLE_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', m.id, ev, 3); refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
 
         const rowMode = modeUI.node;
         const modeBtnPairs = modeUI.btnPairs;
+        const chainUI = dpBuildModeChainEditor({
+          title: 'Sequence',
+          labelFn: (id)=>dpEvolveDualModeLabel(id),
+          onMove: (idx, dir)=>{ dpMoveStoredModeChain(EVOLVE_TRIPLE_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', idx, dir, 3); refresh(); },
+          onRemove: (idx)=>{ dpRemoveStoredModeChainStep(EVOLVE_TRIPLE_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', idx, 3); refresh(); },
+        });
 
         const preview = el('div'); preview.className='mm-small';
         preview.style.opacity = '0.9';
@@ -9186,9 +9990,11 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
           });
 
           // mode buttons
+          const modes = dpGetStoredModeChain(EVOLVE_TRIPLE_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', 3);
           if (typeof dpSetActiveInBtnPairs === 'function'){
-            dpSetActiveInBtnPairs(modeBtnPairs, EVOLVE_TRIPLE_STATE.mode);
+            dpSetActiveInBtnPairs(modeBtnPairs, modes);
           }
+          chainUI.render(modes);
 
           // preview overwrite + run enable
           if (EVOLVE_TRIPLE_STATE.placement === 'between'){
@@ -9199,7 +10005,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
               const auto = (!betweenInfo.monotonic)
                 ? ` (auto-reordering to A=${betweenInfo.A+1}, B=${betweenInfo.B+1}, C=${betweenInfo.C+1})`
                 : '';
-              preview.textContent = `Will overwrite ${betweenInfo.total} slot(s): ${betweenInfo.ab} between A↔B and ${betweenInfo.bc} between B↔C${auto} using mode: ${dpEvolveDualModeLabel(EVOLVE_TRIPLE_STATE.mode)}.`;
+              preview.textContent = `Will overwrite ${betweenInfo.total} slot(s): ${betweenInfo.ab} between A↔B and ${betweenInfo.bc} between B↔C${auto} using mode: ${dpEvolveDualModeLabel(modes)}.`;
               bRun.disabled = false;
             }
           } else {
@@ -9219,7 +10025,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
               const warn = overlap.length
                 ? ` Warning: anchor slot(s) ${overlap.join(', ')} will also be overwritten in this placement.`
                 : '';
-              preview.textContent = `Will overwrite slots ${start}..${end}${note} (B influences the midpoint of the series) using mode: ${dpEvolveDualModeLabel(EVOLVE_TRIPLE_STATE.mode)}.${warn}`;
+              preview.textContent = `Will overwrite slots ${start}..${end}${note} (B influences the midpoint of the series) using mode: ${dpEvolveDualModeLabel(modes)}.${warn}`;
               bRun.disabled = false;
             }
           }
@@ -9262,11 +10068,13 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
 
         bCancel.onclick = ()=>finish(null);
         bRun.onclick = ()=>{
+          const modes = dpGetStoredModeChain(EVOLVE_TRIPLE_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', 3);
           finish({
             aSlot, bSlot, cSlot,
             placement: (EVOLVE_TRIPLE_STATE.placement === 'between') ? 'between' : 'afterA',
             count: EVOLVE_TRIPLE_STATE.count|0,
-            mode: EVOLVE_TRIPLE_STATE.mode || 'specblur',
+            mode: modes[0] || 'specblur',
+            modes,
           });
         };
 
@@ -9274,7 +10082,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
         const l1 = el('div','mm-small'); l1.textContent='Placement:';
         const l2 = el('div','mm-small'); l2.textContent='Slot count (Write after A):';
         const l3 = el('div','mm-small'); l3.textContent='Morph mode:';
-        dlg.append(l1, rowPlace, l2, rowCount, rowCountIn, l3, rowMode, el('hr'), preview, el('hr'), rowBtns);
+        dlg.append(l1, rowPlace, l2, rowCount, rowCountIn, l3, rowMode, chainUI.node, el('hr'), preview, el('hr'), rowBtns);
 
         overlay.append(dlg);
         document.body.append(overlay);
@@ -9296,12 +10104,10 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
         return;
       }
 
-      const mode = String(opts.mode || EVOLVE_TRIPLE_STATE.mode || 'specblur');
+      const modes = dpSanitizeModeChain(opts.modes || opts.mode || EVOLVE_TRIPLE_STATE.modes || EVOLVE_TRIPLE_STATE.mode, EVOLVE_DUAL_MODES, 'specblur', 3);
+      const mode = modes[0] || 'specblur';
       const placement = (opts.placement === 'between') ? 'between' : 'afterA';
       const requestedCount = _clampInt((opts.count|0) || (EVOLVE_TRIPLE_STATE.count|0) || 16, 2, 64);
-
-      const isPM = (mode === 'pm');
-      const pmMax = 0.18; // max phase deviation (cycles) for FM/PM Boost
 
       // If user picked “between”, make sure we have a monotonic A→B→C ordering.
       // This mirrors the prompt's auto-normalize behavior and prevents “Fill gaps”
@@ -9365,7 +10171,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
       const aName = (aRec.name||'WAVE');
       const bName = (bRec.name||'WAVE');
       const cName = (cRec.name||'WAVE');
-      const label = dpEvolveDualModeLabel(mode);
+      const label = dpEvolveDualModeLabel(modes);
       let msg;
 
       if (placement === 'between'){
@@ -9398,15 +10204,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const dist = Math.abs(s - aSlot);
             const t = (totalStepsAB>0) ? (dist / totalStepsAB) : 1;
 
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              const base = dpMorphGenerate(aRec.dataU8, bRec.dataU8, t, 'xfade');
-              const depth = pmMax * 4 * t * (1 - t);
-              morphed = dpPhaseModGenerate(base, bRec.dataU8, depth);
-            } else {
-              morphed = dpMorphGenerate(aRec.dataU8, bRec.dataU8, t, (isPM ? 'xfade' : mode));
-            }
-            const out = morphed;
+            const out = dpApplyMorphModeChain(aRec.dataU8, bRec.dataU8, t, modes);
 
             const num2 = String(s+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
@@ -9423,15 +10221,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const dist = Math.abs(s - bSlot);
             const t = (totalStepsBC>0) ? (dist / totalStepsBC) : 1;
 
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              const base = dpMorphGenerate(bRec.dataU8, cRec.dataU8, t, 'xfade');
-              const depth = pmMax * 4 * t * (1 - t);
-              morphed = dpPhaseModGenerate(base, bRec.dataU8, depth);
-            } else {
-              morphed = dpMorphGenerate(bRec.dataU8, cRec.dataU8, t, (isPM ? 'xfade' : mode));
-            }
-            const out = morphed;
+            const out = dpApplyMorphModeChain(bRec.dataU8, cRec.dataU8, t, modes);
 
             const num2 = String(s+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
@@ -9448,28 +10238,9 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const tGlobal = (n<=1) ? 1 : ((i+1) / n); // 0..1
 
             // Piecewise A→B (first half) then B→C (second half).
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              // FM/PM Boost: base xfade morph + phase modulation from B.
-              let base;
-              if (tGlobal <= 0.5){
-                base = dpMorphGenerate(aRec.dataU8, bRec.dataU8, (tGlobal/0.5), 'xfade');
-              } else {
-                base = dpMorphGenerate(bRec.dataU8, cRec.dataU8, ((tGlobal-0.5)/0.5), 'xfade');
-              }
-              // Keep endpoints + midpoint stable: depth hits 0 at t=0, 0.5, 1.
-              const s2 = Math.sin(Math.PI * 2 * tGlobal);
-              const depth = pmMax * (s2 * s2);
-              morphed = dpPhaseModGenerate(base, bRec.dataU8, depth);
-            } else {
-              if (tGlobal <= 0.5){
-                morphed = dpMorphGenerate(aRec.dataU8, bRec.dataU8, (tGlobal/0.5), (isPM ? 'xfade' : mode));
-              } else {
-                morphed = dpMorphGenerate(bRec.dataU8, cRec.dataU8, ((tGlobal-0.5)/0.5), (isPM ? 'xfade' : mode));
-              }
-            }
-
-            const out = morphed;
+            const out = (tGlobal <= 0.5)
+              ? dpApplyMorphModeChain(aRec.dataU8, bRec.dataU8, (tGlobal/0.5), modes)
+              : dpApplyMorphModeChain(bRec.dataU8, cRec.dataU8, ((tGlobal-0.5)/0.5), modes);
 
             const num2 = String(s+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
@@ -9497,9 +10268,9 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
       }
 
       const __bankAfter = captureBankState(targets);
-      bankPush({ label:`Morph ${aSlot+1}→${bSlot+1}→${cSlot+1} (${mode})`, before: __bankBefore, after: __bankAfter });
+      bankPush({ label:`Morph ${aSlot+1}→${bSlot+1}→${cSlot+1} (${dpEvolveDualModeLabel(modes)})`, before: __bankBefore, after: __bankAfter });
 
-      announceIO(`Morphed A(${aSlot+1}) → B(${bSlot+1}) → C(${cSlot+1}) into ${targets.length} slot${targets.length===1?'':'s'} (${dpEvolveDualModeLabel(mode)}).`);
+      announceIO(`Morphed A(${aSlot+1}) → B(${bSlot+1}) → C(${cSlot+1}) into ${targets.length} slot${targets.length===1?'':'s'} (${dpEvolveDualModeLabel(modes)}).`);
       updateButtonsState();
     }
 
@@ -9520,7 +10291,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
 
         // sanitize persisted state
         EVOLVE_QUAD_STATE.count = _clampInt((EVOLVE_QUAD_STATE.count|0) || 16, 2, 64);
-        EVOLVE_QUAD_STATE.mode = EVOLVE_QUAD_STATE.mode || 'specblur';
+        dpSetStoredModeChain(EVOLVE_QUAD_STATE, 'modes', 'mode', EVOLVE_QUAD_STATE.modes || EVOLVE_QUAD_STATE.mode || 'specblur', EVOLVE_DUAL_MODES, 'specblur', 3);
         EVOLVE_QUAD_STATE.placement = (EVOLVE_QUAD_STATE.placement === 'between') ? 'between' : 'afterA';
 
         const overlay = el('div','mm-digi-guard');
@@ -9562,11 +10333,17 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
           : [{ title:'', items: EVOLVE_DUAL_MODES }];
 
         const modeUI = (typeof dpBuildModeGroups === 'function')
-          ? dpBuildModeGroups(modeGroups, (id)=>{ EVOLVE_QUAD_STATE.mode = String(id||'specblur'); refresh(); })
-          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_DUAL_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=()=>{ EVOLVE_QUAD_STATE.mode=m.id; refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
+          ? dpBuildModeGroups(modeGroups, (id, ev)=>{ dpPickStoredModeChain(EVOLVE_QUAD_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', id, ev, 3); refresh(); })
+          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_DUAL_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=(ev)=>{ dpPickStoredModeChain(EVOLVE_QUAD_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', m.id, ev, 3); refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
 
         const rowMode = modeUI.node;
         const modeBtnPairs = modeUI.btnPairs;
+        const chainUI = dpBuildModeChainEditor({
+          title: 'Sequence',
+          labelFn: (id)=>dpEvolveDualModeLabel(id),
+          onMove: (idx, dir)=>{ dpMoveStoredModeChain(EVOLVE_QUAD_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', idx, dir, 3); refresh(); },
+          onRemove: (idx)=>{ dpRemoveStoredModeChainStep(EVOLVE_QUAD_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', idx, 3); refresh(); },
+        });
 
         const preview = el('div'); preview.className='mm-small';
         preview.style.opacity = '0.9';
@@ -9635,9 +10412,11 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             setActive(b, useCount && counts[i]===(EVOLVE_QUAD_STATE.count|0));
           });
 
+          const modes = dpGetStoredModeChain(EVOLVE_QUAD_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', 3);
           if (typeof dpSetActiveInBtnPairs === 'function'){
-            dpSetActiveInBtnPairs(modeBtnPairs, EVOLVE_QUAD_STATE.mode);
+            dpSetActiveInBtnPairs(modeBtnPairs, modes);
           }
+          chainUI.render(modes);
 
           if (EVOLVE_QUAD_STATE.placement === 'between'){
             if (betweenInfo.total < 1){
@@ -9647,7 +10426,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
               const auto = (!betweenInfo.monotonic)
                 ? ` (auto-reordering to A=${betweenInfo.A+1}, B=${betweenInfo.B+1}, C=${betweenInfo.C+1}, D=${betweenInfo.D+1})`
                 : '';
-              preview.textContent = `Will overwrite ${betweenInfo.total} slot(s): ${betweenInfo.ab} between A↔B, ${betweenInfo.bc} between B↔C, ${betweenInfo.cd} between C↔D${auto} using mode: ${dpEvolveDualModeLabel(EVOLVE_QUAD_STATE.mode)}.`;
+              preview.textContent = `Will overwrite ${betweenInfo.total} slot(s): ${betweenInfo.ab} between A↔B, ${betweenInfo.bc} between B↔C, ${betweenInfo.cd} between C↔D${auto} using mode: ${dpEvolveDualModeLabel(modes)}.`;
               bRun.disabled = false;
             }
           } else {
@@ -9668,7 +10447,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
               const warn = overlap.length
                 ? ` Warning: anchor slot(s) ${overlap.join(', ')} will also be overwritten in this placement.`
                 : '';
-              preview.textContent = `Will overwrite slots ${start}..${end}${note} (B/C shape the interior; D is the end) using mode: ${dpEvolveDualModeLabel(EVOLVE_QUAD_STATE.mode)}.${warn}`;
+              preview.textContent = `Will overwrite slots ${start}..${end}${note} (B/C shape the interior; D is the end) using mode: ${dpEvolveDualModeLabel(modes)}.${warn}`;
               bRun.disabled = false;
             }
           }
@@ -9710,11 +10489,13 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
 
         bCancel.onclick = ()=>finish(null);
         bRun.onclick = ()=>{
+          const modes = dpGetStoredModeChain(EVOLVE_QUAD_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', 3);
           finish({
             aSlot, bSlot, cSlot, dSlot,
             placement: (EVOLVE_QUAD_STATE.placement === 'between') ? 'between' : 'afterA',
             count: EVOLVE_QUAD_STATE.count|0,
-            mode: EVOLVE_QUAD_STATE.mode || 'specblur',
+            mode: modes[0] || 'specblur',
+            modes,
           });
         };
 
@@ -9722,7 +10503,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
         const l1 = el('div','mm-small'); l1.textContent='Placement:';
         const l2 = el('div','mm-small'); l2.textContent='Slot count (Write after A):';
         const l3 = el('div','mm-small'); l3.textContent='Morph mode:';
-        dlg.append(l1, rowPlace, l2, rowCount, rowCountIn, l3, rowMode, el('hr'), preview, el('hr'), rowBtns);
+        dlg.append(l1, rowPlace, l2, rowCount, rowCountIn, l3, rowMode, chainUI.node, el('hr'), preview, el('hr'), rowBtns);
 
         overlay.append(dlg);
         document.body.append(overlay);
@@ -9745,12 +10526,10 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
         return;
       }
 
-      const mode = String(opts.mode || EVOLVE_QUAD_STATE.mode || 'specblur');
+      const modes = dpSanitizeModeChain(opts.modes || opts.mode || EVOLVE_QUAD_STATE.modes || EVOLVE_QUAD_STATE.mode, EVOLVE_DUAL_MODES, 'specblur', 3);
+      const mode = modes[0] || 'specblur';
       const placement = (opts.placement === 'between') ? 'between' : 'afterA';
       const requestedCount = _clampInt((opts.count|0) || (EVOLVE_QUAD_STATE.count|0) || 16, 2, 64);
-
-      const isPM = (mode === 'pm');
-      const pmMax = 0.18; // max phase deviation (cycles) for FM/PM Boost
 
       // If user picked “between”, make sure we have a monotonic A→B→C→D ordering.
       if (placement === 'between'){
@@ -9818,7 +10597,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
       const bName = (bRec.name||'WAVE');
       const cName = (cRec.name||'WAVE');
       const dName = (dRec.name||'WAVE');
-      const label = dpEvolveDualModeLabel(mode);
+      const label = dpEvolveDualModeLabel(modes);
       let msg;
 
       if (placement === 'between'){
@@ -9852,16 +10631,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const dist = Math.abs(s - aSlot);
             const t = (totalStepsAB>0) ? (dist / totalStepsAB) : 1;
 
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              const base = dpMorphGenerate(aRec.dataU8, bRec.dataU8, t, 'xfade');
-              const depth = pmMax * 4 * t * (1 - t);
-              morphed = dpPhaseModGenerate(base, bRec.dataU8, depth);
-            } else {
-              morphed = dpMorphGenerate(aRec.dataU8, bRec.dataU8, t, (isPM ? 'xfade' : mode));
-            }
-
-            const out = morphed;
+            const out = dpApplyMorphModeChain(aRec.dataU8, bRec.dataU8, t, modes);
             const num2 = String(s+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
             LIB.waves[s] = attachDisplayRot({ name:nm, dataU8: out, user:true });
@@ -9876,16 +10646,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const dist = Math.abs(s - bSlot);
             const t = (totalStepsBC>0) ? (dist / totalStepsBC) : 1;
 
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              const base = dpMorphGenerate(bRec.dataU8, cRec.dataU8, t, 'xfade');
-              const depth = pmMax * 4 * t * (1 - t);
-              morphed = dpPhaseModGenerate(base, cRec.dataU8, depth);
-            } else {
-              morphed = dpMorphGenerate(bRec.dataU8, cRec.dataU8, t, (isPM ? 'xfade' : mode));
-            }
-
-            const out = morphed;
+            const out = dpApplyMorphModeChain(bRec.dataU8, cRec.dataU8, t, modes);
             const num2 = String(s+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
             LIB.waves[s] = attachDisplayRot({ name:nm, dataU8: out, user:true });
@@ -9900,16 +10661,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const dist = Math.abs(s - cSlot);
             const t = (totalStepsCD>0) ? (dist / totalStepsCD) : 1;
 
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              const base = dpMorphGenerate(cRec.dataU8, dRec.dataU8, t, 'xfade');
-              const depth = pmMax * 4 * t * (1 - t);
-              morphed = dpPhaseModGenerate(base, dRec.dataU8, depth);
-            } else {
-              morphed = dpMorphGenerate(cRec.dataU8, dRec.dataU8, t, (isPM ? 'xfade' : mode));
-            }
-
-            const out = morphed;
+            const out = dpApplyMorphModeChain(cRec.dataU8, dRec.dataU8, t, modes);
             const num2 = String(s+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
             LIB.waves[s] = attachDisplayRot({ name:nm, dataU8: out, user:true });
@@ -9924,35 +10676,11 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const s = targets[i]|0;
             const tGlobal = (n<=1) ? 1 : ((i+1) / n); // 0..1
 
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              let base;
-              let modSrc = dRec.dataU8;
-              if (tGlobal <= oneThird){
-                base = dpMorphGenerate(aRec.dataU8, bRec.dataU8, (tGlobal/oneThird), 'xfade');
-                modSrc = bRec.dataU8;
-              } else if (tGlobal <= 2*oneThird){
-                base = dpMorphGenerate(bRec.dataU8, cRec.dataU8, ((tGlobal-oneThird)/oneThird), 'xfade');
-                modSrc = cRec.dataU8;
-              } else {
-                base = dpMorphGenerate(cRec.dataU8, dRec.dataU8, ((tGlobal-2*oneThird)/oneThird), 'xfade');
-                modSrc = dRec.dataU8;
-              }
-              // Keep anchors stable: depth hits 0 at t=0, 1/3, 2/3, 1.
-              const s2 = Math.sin(Math.PI * 3 * tGlobal);
-              const depth = pmMax * (s2 * s2);
-              morphed = dpPhaseModGenerate(base, modSrc, depth);
-            } else {
-              if (tGlobal <= oneThird){
-                morphed = dpMorphGenerate(aRec.dataU8, bRec.dataU8, (tGlobal/oneThird), (isPM ? 'xfade' : mode));
-              } else if (tGlobal <= 2*oneThird){
-                morphed = dpMorphGenerate(bRec.dataU8, cRec.dataU8, ((tGlobal-oneThird)/oneThird), (isPM ? 'xfade' : mode));
-              } else {
-                morphed = dpMorphGenerate(cRec.dataU8, dRec.dataU8, ((tGlobal-2*oneThird)/oneThird), (isPM ? 'xfade' : mode));
-              }
-            }
-
-            const out = morphed;
+            const out = (tGlobal <= oneThird)
+              ? dpApplyMorphModeChain(aRec.dataU8, bRec.dataU8, (tGlobal/oneThird), modes)
+              : (tGlobal <= 2*oneThird)
+                ? dpApplyMorphModeChain(bRec.dataU8, cRec.dataU8, ((tGlobal-oneThird)/oneThird), modes)
+                : dpApplyMorphModeChain(cRec.dataU8, dRec.dataU8, ((tGlobal-2*oneThird)/oneThird), modes);
             const num2 = String(s+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
             LIB.waves[s] = attachDisplayRot({ name:nm, dataU8: out, user:true });
@@ -9975,9 +10703,9 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
       }
 
       const __bankAfter = captureBankState(targets);
-      bankPush({ label:`Morph ${aSlot+1}→${bSlot+1}→${cSlot+1}→${dSlot+1} (${mode})`, before: __bankBefore, after: __bankAfter });
+      bankPush({ label:`Morph ${aSlot+1}→${bSlot+1}→${cSlot+1}→${dSlot+1} (${dpEvolveDualModeLabel(modes)})`, before: __bankBefore, after: __bankAfter });
 
-      announceIO(`Morphed A(${aSlot+1}) → B(${bSlot+1}) → C(${cSlot+1}) → D(${dSlot+1}) into ${targets.length} slot${targets.length===1?'':'s'} (${dpEvolveDualModeLabel(mode)}).`);
+      announceIO(`Morphed A(${aSlot+1}) → B(${bSlot+1}) → C(${cSlot+1}) → D(${dSlot+1}) into ${targets.length} slot${targets.length===1?'':'s'} (${dpEvolveDualModeLabel(modes)}).`);
       updateButtonsState();
     }
 
@@ -9995,7 +10723,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
 
         if (slots.length < 4){ resolve(null); return; }
 
-        EVOLVE_DUAL_STATE.mode = EVOLVE_DUAL_STATE.mode || 'specblur';
+        dpSetStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_STATE.modes || EVOLVE_DUAL_STATE.mode || 'specblur', EVOLVE_DUAL_MODES, 'specblur', 3);
 
         const overlay = el('div','mm-digi-guard');
         const dlg = el('div','dlg');
@@ -10023,11 +10751,17 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
           : [{ title:'', items: EVOLVE_DUAL_MODES }];
 
         const modeUI = (typeof dpBuildModeGroups === 'function')
-          ? dpBuildModeGroups(modeGroups, (id)=>{ EVOLVE_DUAL_STATE.mode = String(id||'specblur'); refresh(); })
-          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_DUAL_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=()=>{ EVOLVE_DUAL_STATE.mode=m.id; refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
+          ? dpBuildModeGroups(modeGroups, (id, ev)=>{ dpPickStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', id, ev, 3); refresh(); })
+          : (()=>{ const row=el('div','mm-digi-io mm-small'); (EVOLVE_DUAL_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=(ev)=>{ dpPickStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', m.id, ev, 3); refresh(); }; row.append(b); }); return { node:row, btnPairs:[] }; })();
 
         const rowModes = modeUI.node;
         const modeBtnPairs = modeUI.btnPairs;
+        const chainUI = dpBuildModeChainEditor({
+          title: 'Sequence',
+          labelFn: (id)=>dpEvolveDualModeLabel(id),
+          onMove: (idx, dir)=>{ dpMoveStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', idx, dir, 3); refresh(); },
+          onRemove: (idx)=>{ dpRemoveStoredModeChainStep(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', idx, 3); refresh(); },
+        });
 
         const preview = el('div');
         preview.className = 'mm-small';
@@ -10065,9 +10799,11 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
           });
           keyLine.textContent = `Anchors: ${parts.join(' • ')}`;
 
+          const modes = dpGetStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', 3);
           if (typeof dpSetActiveInBtnPairs === 'function'){
-            dpSetActiveInBtnPairs(modeBtnPairs, EVOLVE_DUAL_STATE.mode);
+            dpSetActiveInBtnPairs(modeBtnPairs, modes);
           }
+          chainUI.render(modes);
 
           const targets = calcTargets();
           if (!targets.length){
@@ -10077,7 +10813,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             bRun.disabled = false;
             const lo = Math.min(...targets) + 1;
             const hi = Math.max(...targets) + 1;
-            preview.textContent = `Will overwrite ${targets.length} slot(s) between anchors (slot ${lo}..${hi}). Mode: ${dpEvolveDualModeLabel(EVOLVE_DUAL_STATE.mode)}.`;
+            preview.textContent = `Will overwrite ${targets.length} slot(s) between anchors (slot ${lo}..${hi}). Mode: ${dpEvolveDualModeLabel(modes)}.`;
           }
         }
 
@@ -10097,10 +10833,11 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
         overlay.onclick = (e)=>{ if (e.target === overlay) close(null); };
         bCancel.onclick = ()=>close(null);
         bRun.onclick = ()=>{
-          close({ slots, mode: EVOLVE_DUAL_STATE.mode || 'specblur' });
+          const modes = dpGetStoredModeChain(EVOLVE_DUAL_STATE, 'modes', 'mode', EVOLVE_DUAL_MODES, 'specblur', 3);
+          close({ slots, mode: modes[0] || 'specblur', modes });
         };
 
-        dlg.append(h, p, el('hr'), keyLine, modeLbl, rowModes, el('hr'), preview, rowBtns);
+        dlg.append(h, p, el('hr'), keyLine, modeLbl, rowModes, chainUI.node, el('hr'), preview, rowBtns);
         overlay.append(dlg);
         document.body.append(overlay);
         document.addEventListener('keydown', onKey);
@@ -10121,9 +10858,8 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
         return;
       }
 
-      const mode = String(opts.mode || EVOLVE_DUAL_STATE.mode || 'specblur');
-      const isPM = (mode === 'pm');
-      const pmMax = 0.18; // max phase deviation (cycles) for FM/PM Boost
+      const modes = dpSanitizeModeChain(opts.modes || opts.mode || EVOLVE_DUAL_STATE.modes || EVOLVE_DUAL_STATE.mode, EVOLVE_DUAL_MODES, 'specblur', 3);
+      const mode = modes[0] || 'specblur';
 
       const recs = slots.map(s=>dpGetSlotWaveRecord(s));
       if (recs.some(r=>!r || !r.dataU8 || !r.dataU8.length)){
@@ -10151,7 +10887,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
       }
 
       // Confirm overwrite
-      const label = dpEvolveDualModeLabel(mode);
+      const label = dpEvolveDualModeLabel(modes);
       const keyLines = slots.map((s, idx)=>{
         const nm = (recs[idx] && recs[idx].name) ? recs[idx].name : 'WAVE';
         return `  • slot ${s+1} (${nm})`;
@@ -10178,16 +10914,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
             const dist = Math.abs((s|0) - seg.aSlot);
             const t = (totalSteps>0) ? (dist / totalSteps) : 1;
 
-            let morphed;
-            if (isPM && typeof dpPhaseModGenerate === 'function'){
-              const base = dpMorphGenerate(seg.aRec.dataU8, seg.bRec.dataU8, t, 'xfade');
-              const depth = pmMax * 4 * t * (1 - t);
-              morphed = dpPhaseModGenerate(base, seg.bRec.dataU8, depth);
-            } else {
-              morphed = dpMorphGenerate(seg.aRec.dataU8, seg.bRec.dataU8, t, (isPM ? 'xfade' : mode));
-            }
-
-            const out = morphed;
+            const out = dpApplyMorphModeChain(seg.aRec.dataU8, seg.bRec.dataU8, t, modes);
 
             const num2 = String((s|0)+1).padStart(2,'0');
             const nm = (prefix2 + num2).slice(0,4).padEnd(4,'0');
@@ -10215,7 +10942,7 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
       }
 
       const __bankAfter = captureBankState(targets);
-      bankPush({ label:`Fill Gaps (${mode})`, before: __bankBefore, after: __bankAfter });
+      bankPush({ label:`Fill Gaps (${dpEvolveDualModeLabel(modes)})`, before: __bankBefore, after: __bankAfter });
 
       announceIO(`Filled gaps: ${slots.length} anchors → wrote ${targets.length} slot${targets.length===1?'':'s'} (${label}).`);
       updateButtonsState();
@@ -10243,20 +10970,21 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
     ];
 
     function dpBlendModeLabel(id){
+      if (Array.isArray(id)) return dpChainLabel(id, dpBlendModeLabel, 'avg');
       const m = BLEND_MODES.find(x=>x.id===id);
       return m ? m.label : String(id||'avg');
     }
 
     function dpUpdateBlendBtnTitle(){
       if (!btnBlend) return;
-      const mode = BLEND_STATE.mode || 'avg';
+      const modes = dpGetStoredModeChain(BLEND_STATE, 'modes', 'mode', BLEND_MODES, 'avg', 3);
       btnBlend.textContent = 'Blend Sel';
-      btnBlend.title = `Blend 2+ selected waves and write the result to a destination slot (prefers the slot after the last selected; if at bank end, uses the first available slot). Mode: ${dpBlendModeLabel(mode)}. Shift-click to change mode.`;
+      btnBlend.title = `Blend 2+ selected waves and write the result to a destination slot (prefers the slot after the last selected; if at bank end, uses the first available slot). Mode: ${dpBlendModeLabel(modes)}. Shift-click to change mode.`;
     }
 
     function dpPromptBlendMode(){
       return new Promise((resolve)=>{
-        BLEND_STATE.mode = BLEND_STATE.mode || 'avg';
+        dpSetStoredModeChain(BLEND_STATE, 'modes', 'mode', BLEND_STATE.modes || BLEND_STATE.mode || 'avg', BLEND_MODES, 'avg', 3);
         const overlay = el('div','mm-digi-guard');
         const dlg = el('div','dlg');
         const h = el('h4'); h.textContent='Blend mode';
@@ -10268,11 +10996,17 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
           : [{ title:'', items: BLEND_MODES }];
 
         const modeUI = (typeof dpBuildModeGroups === 'function')
-          ? dpBuildModeGroups(modeGroups, (id)=>{ BLEND_STATE.mode = String(id||'avg'); refresh(); })
-          : (()=>{ const r=el('div','mm-digi-io mm-small'); (BLEND_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=()=>{ BLEND_STATE.mode=m.id; refresh(); }; r.append(b); }); return { node:r, btnPairs:[] }; })();
+          ? dpBuildModeGroups(modeGroups, (id, ev)=>{ dpPickStoredModeChain(BLEND_STATE, 'modes', 'mode', BLEND_MODES, 'avg', id, ev, 3); refresh(); })
+          : (()=>{ const r=el('div','mm-digi-io mm-small'); (BLEND_MODES||[]).forEach(m=>{ const b=el('button'); b.textContent=m.label; if (m.desc) b.title=m.desc; b.onclick=(ev)=>{ dpPickStoredModeChain(BLEND_STATE, 'modes', 'mode', BLEND_MODES, 'avg', m.id, ev, 3); refresh(); }; r.append(b); }); return { node:r, btnPairs:[] }; })();
 
         const rows = modeUI.node;
         const modeBtnPairs = modeUI.btnPairs;
+        const chainUI = dpBuildModeChainEditor({
+          title: 'Sequence',
+          labelFn: (id)=>dpBlendModeLabel(id),
+          onMove: (idx, dir)=>{ dpMoveStoredModeChain(BLEND_STATE, 'modes', 'mode', BLEND_MODES, 'avg', idx, dir, 3); refresh(); },
+          onRemove: (idx)=>{ dpRemoveStoredModeChainStep(BLEND_STATE, 'modes', 'mode', BLEND_MODES, 'avg', idx, 3); refresh(); },
+        });
         const rowBtns = el('div'); rowBtns.className='mm-digi-io mm-small';
         const bOk = el('button'); bOk.textContent='OK'; bOk.title='Use this blend mode.';
         // Keyboard: Enter should confirm the current selection.
@@ -10281,13 +11015,19 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
         rowBtns.append(bOk,bCancel);
         function setActive(btn,on){ btn.classList.toggle('mm-mode-active', !!on); }
         function refresh(){
+          const modes = dpGetStoredModeChain(BLEND_STATE, 'modes', 'mode', BLEND_MODES, 'avg', 3);
           if (typeof dpSetActiveInBtnPairs === 'function'){
-            dpSetActiveInBtnPairs(modeBtnPairs, BLEND_STATE.mode);
+            dpSetActiveInBtnPairs(modeBtnPairs, modes);
           }
+          chainUI.render(modes);
         }
         bCancel.onclick=()=>{ overlay.remove(); resolve(null); };
-        bOk.onclick=()=>{ overlay.remove(); resolve({ mode: BLEND_STATE.mode }); };
-        dlg.append(h,p,el('hr'),rows,el('hr'),rowBtns);
+        bOk.onclick=()=>{
+          const modes = dpGetStoredModeChain(BLEND_STATE, 'modes', 'mode', BLEND_MODES, 'avg', 3);
+          overlay.remove();
+          resolve({ mode: modes[0] || 'avg', modes });
+        };
+        dlg.append(h,p,el('hr'),rows,chainUI.node,el('hr'),rowBtns);
         overlay.append(dlg);
         document.body.append(overlay);
         refresh();
@@ -10295,7 +11035,8 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
     }
 
     function doBlendSelected(){
-      const mode = BLEND_STATE.mode || 'avg';
+      const modes = dpGetStoredModeChain(BLEND_STATE, 'modes', 'mode', BLEND_MODES, 'avg', 3);
+      const mode = modes[0] || 'avg';
       const editorSlot = EDIT.slot|0;
       const sel = SELECTED ? Array.from(SELECTED).sort((a,b)=>a-b) : [];
       if (sel.length < 2){
@@ -10367,8 +11108,6 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
 
       const pct = _clampInt(Number(NORM_PCT||100),0,100);
 
-      let out;
-
       // --- Blend helpers (deterministic + cheap at N=96) ---
       const _hashU8 = (u8)=>{
         let h = 2166136261>>>0;
@@ -10409,6 +11148,11 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
         x = _clamp01(x);
         return x*x*(3-2*x);
       };
+
+      const computeBlendOnce = (modeId, srcSet)=>{
+        const mode = String(modeId || 'avg');
+        const src = Array.isArray(srcSet) ? srcSet : [];
+        let out;
 
       if (mode === 'specmag' || mode === 'specmagdom'){
         // Average magnitudes, keep phase from first (or dominant) wave
@@ -10628,6 +11372,20 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
         for (let i=0;i<N;i++) out[i] = clamp(Math.round((outF[i]*sc)*127 + 128),0,255);
       }
 
+        return out;
+      };
+
+      const baseSrc = src.map(a=>new Uint8Array(a));
+      let curSrc = baseSrc.map(a=>new Uint8Array(a));
+      let out = null;
+      for (let i=0;i<modes.length;i++){
+        out = computeBlendOnce(modes[i], curSrc);
+        if (i < (modes.length - 1)){
+          curSrc = [new Uint8Array(out)];
+          for (let j=1;j<baseSrc.length;j++) curSrc.push(new Uint8Array(baseSrc[j]));
+        }
+      }
+
       // Normalize (uses the same target as other batch ops)
       out = fxNormalizeTo(out, pct);
 
@@ -10647,9 +11405,9 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
       }
 
       const __bankAfter = captureBankState([targetSlot]);
-      bankPush({ label:`Blend →${targetSlot+1} (${mode})`, before: __bankBefore, after: __bankAfter });
+      bankPush({ label:`Blend →${targetSlot+1} (${dpBlendModeLabel(modes)})`, before: __bankBefore, after: __bankAfter });
 
-      announceIO(`Blended ${sources.length} waves → slot ${targetSlot+1} (${dpBlendModeLabel(mode)}).`);
+      announceIO(`Blended ${sources.length} waves → slot ${targetSlot+1} (${dpBlendModeLabel(modes)}).`);
       updateButtonsState();
     }
 
@@ -10750,7 +11508,8 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
     btnAmpBatch.textContent = 'AMP';
     btnAmpBatch.title =
       'Apply gain trim (dB) to selected slots (if any). If nothing is selected, applies to all filled slots (and the dirty active slot).\n' +
-      'Uses the Gain Trim slider. This is a pure multiply (no per-slot normalization), so relative slot levels are preserved.';
+      'Uses the Gain Trim slider. This is a pure multiply (no per-slot normalization), so relative slot levels are preserved.\n\n' +
+      'Shift+click: AMP tools (exact trim, ramp, ping-pong, alt skew, stepped gain).';
 
     gainAllSlider.oninput = ()=>{
       const db = Number(gainAllSlider.value||0);
@@ -10761,7 +11520,28 @@ Slot ${aSlot+1} is left unchanged. Continue?${note}${overlapNote}`;
       try{ root.localStorage && localStorage.setItem('mm_dp_gainAllDb', String(root.__digiproGainAllDb)); }catch(_){ }
     };
 
-    btnAmpBatch.onclick = ()=>{
+    btnAmpBatch.onclick = async (ev)=>{
+      if (ev && ev.shiftKey){
+        try{
+          const opts = await dpPromptAmpShiftOptions();
+          if (!opts) return;
+
+          if (opts.mode === 'trim' && gainAllSlider){
+            const db = dpAmpClampDb(opts.exactDb, root.__digiproGainAllDb);
+            root.__digiproGainAllDb = db;
+            gainAllSlider.value = String(db);
+            gainAllSlider.title = `Gain trim: ${db.toFixed(1)} dB`;
+            try{ gainVal.textContent = `${__fmtDb(db)} dB`; }catch(_){ }
+            try{ root.localStorage && localStorage.setItem('mm_dp_gainAllDb', String(db)); }catch(_){ }
+          }
+
+          doGainSeriesSlots(opts);
+        }catch(err){
+          console.warn('AMP tools cancelled/failed:', err);
+        }
+        return;
+      }
+
       const db = Number(gainAllSlider ? gainAllSlider.value : 0);
       if (!isFinite(db)){
         announceIO('Invalid dB value.', true);
@@ -11920,6 +12700,7 @@ Shift‑click to choose slots/mode/seam/FX.`;
         if (nameIn){
           nameIn.value = (EDIT.name || 'WAVE').toUpperCase();
         }
+        try{ syncWavetableTuneUi(); }catch(_){ }
 
         const refreshHeat = dpHeatOf(EDIT);
         if (heatBadge){

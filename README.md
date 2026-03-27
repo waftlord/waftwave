@@ -6,7 +6,7 @@ https://wftlrd.uk/waftwave
 
 Waft Wave is a **static, client‑side web app** (HTML + vanilla JS) for editing and transferring **Elektron Monomachine DigiPRO** single‑cycle waveforms over **MIDI SysEx** (C6‑style **0x5D** dumps / **0x5E** requests).
 
-It also includes optional tooling for **Machinedrum UW** wave sending (see `assets/js/md-uw-wavemode.js`).
+It also includes optional tooling for **Machinedrum UW** wave sending (see `assets/js/md-uw-wavemode.js`) and optional export for **Tonverk** wavetables.
 
 > **Not affiliated with or endorsed by Elektron.**  
 > “Elektron”, “Monomachine”, and “Machinedrum” are trademarks of Elektron Music Machines.
@@ -19,38 +19,6 @@ It also includes optional tooling for **Machinedrum UW** wave sending (see `asse
 - `import-export.js` — WAV / SYX / JSON import + WAV / SYX / ZIP export
 - `scripts/e2e-sim-check.mjs` — Node-based smoke test for asset wiring and core browser/runtime flows
 
-## Quick start
-
-### Option A: Run locally (recommended for development)
-
-WebMIDI generally requires a **secure context**. `http://localhost` counts as secure in modern browsers.
-
-```bash
-# from the repo root
-python3 -m http.server 8000
-# then open: http://localhost:8000
-```
-
-### Optional: run the smoke test
-
-If you have Node.js available, you can run the included smoke test before sharing changes:
-
-```bash
-node scripts/e2e-sim-check.mjs
-```
-
-### Option B: Host on GitHub Pages
-
-This repo is a static site (no build step), so it works well with **GitHub Pages**:
-
-1. Push the repo to GitHub.
-2. Open **Settings → Pages**.
-3. Under **Build and deployment**, choose **Deploy from a branch**.
-4. Select your default branch and the **`/ (root)`** folder.
-5. Save and wait for the Pages deploy to finish.
-
-GitHub Pages is served over HTTPS, which satisfies the browser secure-context requirement for WebMIDI. Chromium-based browsers are still recommended for SysEx access.
-
 ## Browser / MIDI notes
 
 - WebMIDI + SysEx is best supported in **Chromium‑based browsers** (Chrome / Edge).
@@ -61,7 +29,7 @@ GitHub Pages is served over HTTPS, which satisfies the browser secure-context re
 
 The DigiPRO waveform dump message is a fixed‑size **7027‑byte SysEx** message.
 
-Under the hood, DigiPRO decode reads the `0x5D` SysEx header, slot, and 4‑character name, 7‑bit unpacks the **7008‑byte** payload back into **6132 raw bytes**, and then reassembles those bytes as **1022 six‑byte blocks** laid out `A0_hi, A0_lo, B_hi, A1_hi, A1_lo, B_lo`, which become three `Int16Array(1022)` streams (`t0`, `t1`, `t2`). Encode does the reverse, but first renders a single cycle into the Monomachine/C6 table structure: DC is removed, the wave is resampled to **1024** samples, FFT/C6 rolloff and coefficient weighting are applied, and nine stacked mip levels (`1024..4`) are quantized into the A/B streams before being repacked, 7‑bit encoded, and wrapped with checksum/length bytes. The “special sauce trapezoid” is this multi‑resolution table layout: `t0` and `t1` hold the main A stream as even/odd samples across the stacked levels, while `t2` carries the companion low‑passed B stream for the smaller levels plus two zero terminators, so DigiPRO stores a compact wavetable pyramid rather than one flat 1024‑sample waveform.
+Under the hood, DigiPRO decode reads the `0x5D` SysEx header, slot, and 4‑character name, 7‑bit unpacks the **7008‑byte** payload back into **6132 raw bytes**, and then reassembles those bytes as **1022 six‑byte blocks** laid out `A0_hi, A0_lo, B_hi, A1_hi, A1_lo, B_lo`, which become three `Int16Array(1022)` streams (`t0`, `t1`, `t2`). Encode does the reverse, but first renders a single cycle into the Monomachine/C6 table structure: DC is removed, the wave is resampled to **1024** samples, FFT/C6 rolloff and coefficient weighting are applied, and nine stacked mip levels (`1024..4`) are quantized into the A/B streams before being repacked, 7‑bit encoded, and wrapped with checksum/length bytes. The multi‑resolution table layout: `t0` and `t1` hold the main A stream as even/odd samples across the stacked levels, while `t2` carries the companion low‑passed B stream for the smaller levels plus two zero terminators, so DigiPRO stores a compact wavetable pyramid rather than one flat 1024‑sample waveform.
 
 ## WAV export notes
 

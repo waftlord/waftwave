@@ -39,6 +39,21 @@
       try{ drawWavetableViewport(); }catch(_){ }
     });
   }
+  try{ root.requestWavetableViewportDraw = requestWavetableViewportDraw; }catch(_){ }
+
+  function getViewportPlayhead(){
+    try{
+      if (typeof getWavetablePreviewPlayhead === 'function'){
+        const playhead = getWavetablePreviewPlayhead();
+        if (playhead && playhead.running) return playhead;
+      }
+    }catch(_){ }
+    return null;
+  }
+
+  function refreshWavetableViewportNow(){
+    try{ drawWavetableViewport(); }catch(_){ requestWavetableViewportDraw(); }
+  }
 
   function drawWavetableViewport(){
     const c = wavetableCanvas;
@@ -79,9 +94,15 @@
     const spanX = Math.max(90, cssW - left - 28 - depthX);
     const amp = Math.max(10, Math.min(cssH * 0.11, 34));
     const editorSlot = (EDIT && typeof EDIT.slot === 'number') ? (EDIT.slot|0) : 0;
-    const focusSlotRaw = (previewSlotIdx != null)
+    const playhead = getViewportPlayhead();
+    const hasPlayhead = !!(playhead && isFinite(playhead.slotFloat));
+    const playheadSlot = hasPlayhead ? clamp(+playhead.slotFloat || 0, 0, 63) : 0;
+    const playheadTrail = hasPlayhead ? clamp(0.95 + ((+playhead.slotsPerSecond || 0) / 90), 0.95, 3.25) : 0;
+    const focusSlotRaw = hasPlayhead
+      ? (playhead.currentSlot|0)
+      : ((previewSlotIdx != null)
       ? (previewSlotIdx|0)
-      : ((padsHoverIdx != null) ? (padsHoverIdx|0) : (((typeof activeIdx === 'number') ? (activeIdx|0) : editorSlot)));
+      : ((padsHoverIdx != null) ? (padsHoverIdx|0) : (((typeof activeIdx === 'number') ? (activeIdx|0) : editorSlot))));
     const focusSlot = clamp(focusSlotRaw, 0, 63);
 
     // Perspective guide rails so the table reads as a single shared viewport.
@@ -101,6 +122,32 @@
       ctx.lineTo(left + depthX + t * spanX, top + depthY);
     }
     ctx.stroke();
+
+    if (hasPlayhead){
+      const tPlay = playheadSlot / 63;
+      const xShift = tPlay * depthX;
+      const yShift = tPlay * depthY;
+      const baseY = top + yShift;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(left + xShift, baseY);
+      ctx.lineTo(left + xShift + spanX, baseY);
+      ctx.strokeStyle = 'rgba(112, 255, 198, 0.18)';
+      ctx.lineWidth = Math.min(12, 4.8 + (playheadTrail * 2.2));
+      ctx.shadowBlur = 18 + (playheadTrail * 7);
+      ctx.shadowColor = 'rgba(114, 255, 198, 0.30)';
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(left + xShift, baseY);
+      ctx.lineTo(left + xShift + spanX, baseY);
+      ctx.strokeStyle = 'rgba(214, 255, 240, 0.72)';
+      ctx.lineWidth = 1.25;
+      ctx.shadowBlur = 0;
+      ctx.stroke();
+      ctx.restore();
+    }
 
     const slotLines = [];
     let filledCount = 0;
@@ -126,6 +173,10 @@
       const alpha = line.hasWave ? (0.16 + (tDepth * 0.34)) : 0.06;
       const isEditor = idx === editorSlot;
       const isSelected = !!(SELECTED && SELECTED.has && SELECTED.has(idx));
+      const playheadDist = hasPlayhead ? Math.abs(idx - playheadSlot) : Infinity;
+      const playheadMix = hasPlayhead ? Math.max(0, 1 - (playheadDist / playheadTrail)) : 0;
+      const playheadGlow = hasPlayhead ? Math.max(0, 1 - (playheadDist / (playheadTrail + 0.85))) : 0;
+      const inScanRange = hasPlayhead && idx >= (playhead.startSlot|0) && idx <= (playhead.endSlot|0);
 
       ctx.save();
       ctx.beginPath();
@@ -144,11 +195,20 @@
         else ctx.lineTo(x, y);
       }
 
-      if (isFocus){
+      if (hasPlayhead && playheadMix > 0.001){
+        const hiAlpha = Math.min(0.96, 0.28 + (playheadGlow * 0.66));
+        ctx.strokeStyle = `rgba(183, 255, 227, ${hiAlpha.toFixed(3)})`;
+        ctx.lineWidth = isFocus ? (2.05 + (playheadMix * 1.2)) : (1.1 + (playheadMix * 0.95));
+        ctx.shadowBlur = 10 + (playheadGlow * 18);
+        ctx.shadowColor = `rgba(114, 255, 198, ${Math.min(0.64, 0.18 + (playheadGlow * 0.38)).toFixed(3)})`;
+      } else if (isFocus){
         ctx.strokeStyle = '#b7ffe3';
         ctx.lineWidth = 2.4;
         ctx.shadowBlur = 16;
         ctx.shadowColor = 'rgba(114, 255, 198, 0.45)';
+      } else if (inScanRange && line.hasWave){
+        ctx.strokeStyle = `rgba(90, 255, 176, ${(alpha + 0.07).toFixed(3)})`;
+        ctx.lineWidth = 1.05;
       } else if (isEditor || isSelected){
         ctx.strokeStyle = isSelected ? 'rgba(255, 224, 128, 0.90)' : 'rgba(122, 255, 214, 0.88)';
         ctx.lineWidth = isSelected ? 1.6 : 1.35;
@@ -173,7 +233,9 @@
 
     ctx.save();
     const focusName = (focusLine && focusLine.rec && focusLine.rec.name) ? String(focusLine.rec.name).toUpperCase() : 'EMPTY';
-    const focusLabel = `SLOT ${String((focusSlot|0) + 1).padStart(2, '0')}  ${focusName}`;
+    const focusLabel = hasPlayhead
+      ? `SCAN ${String((playhead.startSlot|0) + 1).padStart(2, '0')}-${String((playhead.endSlot|0) + 1).padStart(2, '0')}  SLOT ${String((focusSlot|0) + 1).padStart(2, '0')}  ${focusName}`
+      : `SLOT ${String((focusSlot|0) + 1).padStart(2, '0')}  ${focusName}`;
     ctx.fillStyle = 'rgba(226, 255, 241, 0.90)';
     ctx.font = '600 11px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.textAlign = 'left';
@@ -185,6 +247,8 @@
     ctx.fillStyle = 'rgba(136, 214, 181, 0.78)';
     ctx.fillText(`${filledCount}/64 FILLED`, cssW - 18, 10);
     ctx.restore();
+
+    if (hasPlayhead) requestWavetableViewportDraw();
   }
 
   function stopViewportScan(){
@@ -192,6 +256,7 @@
       if (typeof stopWavetablePreview === 'function') stopWavetablePreview();
       else stopPreview();
     }catch(_){ }
+    refreshWavetableViewportNow();
   }
 
   function getViewportScanScope(){
@@ -292,11 +357,13 @@
         startWavetablePreview(built.seq, {
           loop: false,
           midi: auditionMidi,
+          startSlot: built.scope.startSlot|0,
           sampleRate: pp ? pp.sampleRate : 44100,
           pointsPerCycle: pp ? pp.pointsPerCycle : basePPC,
           pitchMethod: pp ? pp.pitchMethod : 'sr',
           pitchParams: pp || undefined,
         });
+        refreshWavetableViewportNow();
         return true;
       }
       stopViewportScan();

@@ -440,6 +440,11 @@ const viewNorm = false;
       }
 
       canv.addEventListener('pointerdown', (e)=>{
+        if (e && e.shiftKey){
+          e.preventDefault();
+          try{ if (typeof toggleKeyboardView === 'function') toggleKeyboardView(); }catch(_){ }
+          return;
+        }
         down=true;
         try{ canv.setPointerCapture(e.pointerId); }catch(_){ }
 

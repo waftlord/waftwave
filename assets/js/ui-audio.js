@@ -195,6 +195,7 @@
     }
   }catch(_){}
   _activeSrc=null; _activeGain=null;
+  clearWavetablePreviewState();
   try{ stopSmoothPreview(); }catch(_){ }
 }
 function startPreview(dataU8, midi=60){
@@ -241,6 +242,46 @@ function startPreview(dataU8, midi=60){
 // -------------- wavetable scan preview --------------
   let _wtScanToken = 0;
   let _wtScanRunning = false;
+  let _wtScanState = null;
+
+  function clearWavetablePreviewState(){
+    _wtScanRunning = false;
+    _wtScanState = null;
+  }
+
+  function getWavetablePreviewPlayhead(){
+    const state = _wtScanState;
+    if (!state || !_wtScanRunning) return null;
+
+    const ac = state.ac || ensureAudio();
+    const duration = Math.max(0.001, +state.duration || 0.001);
+    const slotSpan = Math.max(0, (state.endSlot|0) - (state.startSlot|0));
+    let progress = ((ac.currentTime || 0) - (+state.startTime || 0)) / duration;
+
+    if (!isFinite(progress)) progress = 0;
+    if (state.loop){
+      progress = progress - Math.floor(progress);
+      if (progress < 0) progress += 1;
+    } else {
+      progress = Math.max(0, Math.min(1, progress));
+    }
+
+    const slotFloat = (slotSpan > 0)
+      ? ((state.startSlot|0) + (progress * slotSpan))
+      : (state.startSlot|0);
+
+    return {
+      running: true,
+      loop: !!state.loop,
+      progress,
+      startSlot: state.startSlot|0,
+      endSlot: state.endSlot|0,
+      slotCount: Math.max(1, state.slotCount|0),
+      slotFloat,
+      currentSlot: clamp(Math.round(slotFloat), state.startSlot|0, state.endSlot|0),
+      slotsPerSecond: Math.max(0, (+state.slotSpeed) || 0),
+    };
+  }
 
   function isWavetablePreviewRunning(){
     return !!_wtScanRunning;
@@ -249,7 +290,7 @@ function startPreview(dataU8, midi=60){
   function stopWavetablePreview(){
     // Invalidate any onended handlers from prior preview sessions.
     _wtScanToken++;
-    _wtScanRunning = false;
+    clearWavetablePreviewState();
     try{ stopPreview(); }catch(_){ }
   }
 
@@ -300,6 +341,7 @@ function startPreview(dataU8, midi=60){
     const outPPC = (ppcIn === null || ppcIn === undefined || ppcIn === '') ? null : clampInt(parseInt(ppcIn,10) || 0, 1, 1<<20);
 
     const loop = (opts.loop == null) ? true : !!opts.loop;
+    const startSlot = clampInt(parseInt(opts.startSlot, 10) || 0, 0, 63);
 
     stopWavetablePreview();
 
@@ -430,11 +472,22 @@ function startPreview(dataU8, midi=60){
 
     // Track "running" state for the UI toggle.
     const token = ++_wtScanToken;
+    const scanDuration = (buf.duration > 0 && rate > 0) ? (buf.duration / rate) : 0;
     _wtScanRunning = true;
+    _wtScanState = {
+      ac,
+      loop,
+      startTime: ac.currentTime,
+      duration: scanDuration,
+      slotCount: frames.length|0,
+      startSlot,
+      endSlot: clampInt(startSlot + Math.max(0, (frames.length|0) - 1), startSlot, 63),
+      slotSpeed: (scanDuration > 0) ? (Math.max(0, (frames.length|0) - 1) / scanDuration) : 0,
+    };
 
     src.onended = ()=>{
       if (token !== _wtScanToken) return;
-      _wtScanRunning = false;
+      clearWavetablePreviewState();
     };
 
     // Share the same global stopPreview() path as the normal preview.
@@ -443,7 +496,7 @@ function startPreview(dataU8, midi=60){
 
     try{ src.start(); }catch(err){
       console.warn('Wavetable preview failed:', err);
-      _wtScanRunning = false;
+      clearWavetablePreviewState();
       try{ stopPreview(); }catch(_){ }
     }
   }
@@ -454,6 +507,7 @@ function startPreview(dataU8, midi=60){
     root.startWavetablePreview = startWavetablePreview;
     root.stopWavetablePreview = stopWavetablePreview;
     root.isWavetablePreviewRunning = isWavetablePreviewRunning;
+    root.getWavetablePreviewPlayhead = getWavetablePreviewPlayhead;
     root.startSmoothPreview = startSmoothPreview;
     root.stopSmoothPreview = stopSmoothPreview;
   }catch(_){ }

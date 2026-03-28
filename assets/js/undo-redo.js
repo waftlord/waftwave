@@ -143,6 +143,14 @@
     else root.__digiproActiveIdx = v|0;
   }
 
+  function prepareForHistoryNavigation(info){
+    try{
+      if (typeof root.__digiproBeforeUndoRedo === 'function'){
+        root.__digiproBeforeUndoRedo(info || null);
+      }
+    }catch(_){ }
+  }
+
   // ----------------------------- editor history -----------------------------
 
   const UNDO = {
@@ -280,7 +288,8 @@
       selected: new Set(Array.from(SELECTED || [])),
       selectAnchor: (selectAnchor === null || selectAnchor === undefined) ? null : (selectAnchor|0),
       activeIdx: activeIdx|0,
-      editor: null
+      editor: null,
+      simpleMode: undefined
     };
 
     // Capture current editor buffer too (even if not one of the touched slots) so undo can be deterministic.
@@ -301,6 +310,16 @@
           return u;
         })()
       };
+    }
+
+    if (opts.includeSimpleMode){
+      try{
+        if (typeof root.__digiproCaptureSimpleModeState === 'function'){
+          st.simpleMode = deepCloneAny(root.__digiproCaptureSimpleModeState());
+        } else if (root.__digiproSimpleModeState && typeof root.__digiproSimpleModeState === 'object'){
+          st.simpleMode = deepCloneAny(root.__digiproSimpleModeState);
+        }
+      }catch(_){ }
     }
 
     // Dirty set
@@ -366,7 +385,7 @@
     if (EDIT && state.editor && state.editor.dataU8){
       EDIT.slot = state.editor.slot|0;
       EDIT.name = sanitizeName4(state.editor.name || 'WAVE');
-	      EDIT._dpHeat = (typeof state.editor._dpHeat === 'number' && isFinite(state.editor._dpHeat) && state.editor._dpHeat > 0) ? state.editor._dpHeat : 1;
+		      EDIT._dpHeat = (typeof state.editor._dpHeat === 'number' && isFinite(state.editor._dpHeat) && state.editor._dpHeat > 0) ? state.editor._dpHeat : 1;
       {
         const u = new Uint8Array(state.editor.dataU8);
         try{ if (state.editor.dataU8.displayRot !== undefined) u.displayRot = state.editor.dataU8.displayRot|0; }catch(_){ }
@@ -382,6 +401,16 @@
 
       // Reset editor undo baseline to the restored buffer.
       try{ initUndo(); }catch(_){}
+    }
+
+    if (Object.prototype.hasOwnProperty.call(state, 'simpleMode')){
+      try{
+        if (typeof root.__digiproApplySimpleModeState === 'function'){
+          root.__digiproApplySimpleModeState(deepCloneAny(state.simpleMode), { fromHistory:true });
+        } else if (state.simpleMode && typeof state.simpleMode === 'object'){
+          root.__digiproSimpleModeState = deepCloneAny(state.simpleMode);
+        }
+      }catch(_){ }
     }
 
     // Repaint: touched slots + any slots whose selection/active state changed.
@@ -497,6 +526,7 @@
   function canRedoAny(){ return canRedo() || bankCanRedo(); }
 
   function undoAny(){
+    prepareForHistoryNavigation({ dir:'undo', lastActionDomain: LAST_ACTION_DOMAIN, lastUndoDomain: LAST_UNDO_DOMAIN });
     if (LAST_ACTION_DOMAIN === 'bank'){
       if (bankCanUndo()) return bankUndo();
       if (canUndo()) return undo();
@@ -508,6 +538,7 @@
   }
 
   function redoAny(){
+    prepareForHistoryNavigation({ dir:'redo', lastActionDomain: LAST_ACTION_DOMAIN, lastUndoDomain: LAST_UNDO_DOMAIN });
     if (LAST_UNDO_DOMAIN === 'bank'){
       if (bankCanRedo()) return bankRedo();
       if (canRedo()) return redo();

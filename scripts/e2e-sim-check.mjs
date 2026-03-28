@@ -311,6 +311,118 @@ await test('All scripts execute in mocked browser runtime', async () => {
   }
 });
 
+await test('Bank undo/redo restores Simple Mode state for Simple Mode actions', async () => {
+  const harness = createHarness();
+  await harness.runFile('assets/js/undo-redo.js');
+
+  const root = harness.context;
+  const LIB = {
+    waves: Array.from({ length: 64 }, () => null),
+    dirty: new Set()
+  };
+  const SELECTED = new Set();
+  const EDIT = {
+    slot: 0,
+    name: 'WAVE',
+    _dpHeat: 1,
+    dataU8: new Uint8Array([128, 160, 96, 144])
+  };
+
+  LIB.waves[0] = { name: 'WAVE', dataU8: new Uint8Array(EDIT.dataU8), user: true };
+
+  root.__digiproSimpleModeState = {
+    mode: 'simple',
+    morph: 'linear',
+    fold: 25,
+    skew: 0,
+    sat: 0,
+    crush: 0,
+    pwm: 0,
+    pd: 0,
+    tone: 0,
+    smear: 0
+  };
+
+  const appliedStates = [];
+  root.__digiproCaptureSimpleModeState = () => JSON.parse(JSON.stringify(root.__digiproSimpleModeState));
+  root.__digiproApplySimpleModeState = (next) => {
+    const clone = JSON.parse(JSON.stringify(next));
+    appliedStates.push(clone);
+    root.__digiproSimpleModeState = clone;
+  };
+
+  root.DP_Undo.init(() => ({
+    LIB,
+    EDIT,
+    SELECTED,
+    getSelectAnchor: () => null,
+    setSelectAnchor: () => {},
+    getActiveIdx: () => 0,
+    setActiveIdx: () => {}
+  }));
+
+  const before = root.captureBankState([0], { includeSimpleMode: true });
+
+  root.__digiproSimpleModeState.fold = 80;
+  LIB.waves[0] = { name: 'WAVE', dataU8: new Uint8Array([128, 192, 64, 160]), user: true };
+  EDIT.dataU8 = new Uint8Array([128, 192, 64, 160]);
+  const after = root.captureBankState([0], { includeSimpleMode: true });
+
+  root.bankPush({ label: 'Simple Fold', before, after });
+
+  root.bankUndo();
+  expectEq(root.__digiproSimpleModeState.fold, 25, 'bank undo should restore previous Simple Mode slider state');
+  expectTypedArrayEq(LIB.waves[0].dataU8, before.waves[0].dataU8, 'bank undo should restore previous bank waveform');
+
+  root.bankRedo();
+  expectEq(root.__digiproSimpleModeState.fold, 80, 'bank redo should restore later Simple Mode slider state');
+  expectTypedArrayEq(LIB.waves[0].dataU8, after.waves[0].dataU8, 'bank redo should restore later bank waveform');
+  expect(appliedStates.length >= 2, 'expected Simple Mode apply hook to run during undo/redo');
+});
+
+await test('undoAny runs pending-history hook before navigating history', async () => {
+  const harness = createHarness();
+  await harness.runFile('assets/js/undo-redo.js');
+
+  const root = harness.context;
+  const LIB = {
+    waves: Array.from({ length: 64 }, () => null),
+    dirty: new Set()
+  };
+  const SELECTED = new Set();
+  const EDIT = {
+    slot: 0,
+    name: 'WAVE',
+    _dpHeat: 1,
+    dataU8: new Uint8Array([128, 160, 96, 144])
+  };
+
+  LIB.waves[0] = { name: 'WAVE', dataU8: new Uint8Array(EDIT.dataU8), user: true };
+
+  root.DP_Undo.init(() => ({
+    LIB,
+    EDIT,
+    SELECTED,
+    getSelectAnchor: () => null,
+    setSelectAnchor: () => {},
+    getActiveIdx: () => 0,
+    setActiveIdx: () => {}
+  }));
+
+  const before = root.captureBankState([0]);
+  LIB.waves[0] = { name: 'WAVE', dataU8: new Uint8Array([128, 192, 64, 160]), user: true };
+  const after = root.captureBankState([0]);
+  root.bankPush({ label: 'History Hook', before, after });
+
+  let hookRuns = 0;
+  root.__digiproBeforeUndoRedo = () => { hookRuns += 1; };
+
+  root.undoAny();
+
+  expectEq(hookRuns, 1, 'undoAny should call the pre-history hook once');
+  expectTypedArrayEq(LIB.waves[0].dataU8, before.waves[0].dataU8, 'undoAny should still apply bank undo after the hook');
+});
+
 await test('DigiPRO SysEx encode/decode and request flow', async () => {
   const harness = createHarness();
   await harness.runFile('assets/js/digipro-sysex.js');

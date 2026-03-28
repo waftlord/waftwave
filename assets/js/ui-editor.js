@@ -104,19 +104,368 @@ const viewNorm = false;
   ctx.stroke();
 }
 
+const DP_SIMPLE_MODE_STORAGE_KEY = 'mm_dp_simple_mode_v1';
+const DP_SIMPLE_MODE_CONTROLS = [
+  { id:'fold',  label:'Fold',  min:0,    max:100, step:1, neutral:0 },
+  { id:'skew',  label:'Skew',  min:-100, max:100, step:1, neutral:0 },
+  { id:'sat',   label:'Sat',   min:0,    max:100, step:1, neutral:0 },
+  { id:'crush', label:'Crush', min:0,    max:100, step:1, neutral:0 },
+  { id:'pwm',   label:'PWM',   min:0,    max:100, step:1, neutral:0 },
+  { id:'pd',    label:'PD',    min:0,    max:100, step:1, neutral:0 },
+  { id:'tone',  label:'Tone',  min:-100, max:100, step:1, neutral:0 },
+  { id:'smear', label:'Smear', min:0,    max:100, step:1, neutral:0 },
+];
+const DP_SIMPLE_MORPH_OPTIONS = [
+  ['linear', 'Linear'],
+  ['spectral', 'Spectral'],
+  ['phaseWarp', 'Phase Warp'],
+  ['equalPower', 'Equal Power'],
+  ['magnitudeOnly', 'Magnitude Only'],
+  ['phaseOnly', 'Phase Only'],
+  ['pingPong', 'Ping-Pong'],
+  ['centerOut', 'Center-Out']
+];
+const DP_SIMPLE_MORPH_INFO = {
+  linear: { blend:'direct', distribution:'forward' },
+  spectral: { blend:'spectral', distribution:'forward' },
+  phaseWarp: { blend:'phaseWarp', distribution:'forward' },
+  equalPower: { blend:'equalPower', distribution:'forward' },
+  magnitudeOnly: { blend:'magnitudeOnly', distribution:'forward' },
+  phaseOnly: { blend:'phaseOnly', distribution:'forward' },
+  pingPong: { blend:'direct', distribution:'pingPong' },
+  centerOut: { blend:'direct', distribution:'centerOut' }
+};
+const DP_SIMPLE_CONTROL_DISTRIBUTION = {
+  fold: { mode:'hybrid', floor:0.35 },
+  skew: { mode:'fanout' },
+  sat: { mode:'global' },
+  crush: { mode:'global' },
+  pwm: { mode:'fanout' },
+  pd: { mode:'fanout' },
+  tone: { mode:'fanout' },
+  smear: { mode:'fanout' }
+};
+const DP_SIMPLE_CONTROL_MORPH_RULES = {
+  tone: {
+    disabled: {
+      phaseOnly: 'Tone is unavailable in Phase Only morph because that mode ignores spectral magnitude changes.'
+    },
+    postBlend: {
+      equalPower: 0.18,
+      phaseWarp: 0.36
+    }
+  },
+  smear: {
+    disabled: {
+      phaseOnly: 'Smear is unavailable in Phase Only morph because that mode ignores spectral magnitude changes.'
+    },
+    postBlend: {
+      equalPower: 0.24,
+      phaseWarp: 0.46
+    }
+  }
+};
+
+function dpSimpleMorphInfo(mode){
+  const key = String(mode || '');
+  if (Object.prototype.hasOwnProperty.call(DP_SIMPLE_MORPH_INFO, key)) return DP_SIMPLE_MORPH_INFO[key];
+  return DP_SIMPLE_MORPH_INFO.linear;
+}
+
+function dpSimpleControlDisabledReason(id, morph){
+  const cfg = DP_SIMPLE_CONTROL_MORPH_RULES[id];
+  if (!cfg || !cfg.disabled) return '';
+  const reason = cfg.disabled[String(morph || '')];
+  return reason ? String(reason) : '';
+}
+
+function dpSimplePostBlendWeight(id, morph, amount){
+  const cfg = DP_SIMPLE_CONTROL_MORPH_RULES[id];
+  if (!cfg || !cfg.postBlend) return 0;
+  const base = Number(cfg.postBlend[String(morph || '')]);
+  if (!(base > 0)) return 0;
+  const amt = Math.max(0, Math.min(1, Math.abs(Number(amount) || 0)));
+  return Math.max(0, Math.min(1, base * amt));
+}
+
+function dpSimpleDefaultState(){
+  return {
+    mode: 'classic',
+    morph: 'linear',
+    fold: 0,
+    skew: 0,
+    sat: 0,
+    crush: 0,
+    pwm: 0,
+    pd: 0,
+    tone: 0,
+    smear: 0,
+  };
+}
+
+function dpNormSimpleModeState(raw){
+  const src = (raw && typeof raw === 'object') ? raw : {};
+  const out = dpSimpleDefaultState();
+  out.mode = (src.mode === 'simple') ? 'simple' : 'classic';
+  out.morph = Object.prototype.hasOwnProperty.call(DP_SIMPLE_MORPH_INFO, src.morph) ? src.morph : 'linear';
+  for (const ctl of DP_SIMPLE_MODE_CONTROLS){
+    const v = parseInt(src[ctl.id], 10);
+    out[ctl.id] = Math.max(ctl.min, Math.min(ctl.max, isFinite(v) ? v : ctl.neutral));
+  }
+  return out;
+}
+
+function dpLoadSimpleModeState(){
+  try{
+    if (!root.localStorage) return dpSimpleDefaultState();
+    const raw = localStorage.getItem(DP_SIMPLE_MODE_STORAGE_KEY);
+    const out = raw ? dpNormSimpleModeState(JSON.parse(raw)) : dpSimpleDefaultState();
+    out.mode = 'classic';
+    return out;
+  }catch(_){
+    return dpSimpleDefaultState();
+  }
+}
+
+function dpSaveSimpleModeState(state){
+  try{
+    if (!root.localStorage) return;
+    localStorage.setItem(DP_SIMPLE_MODE_STORAGE_KEY, JSON.stringify(dpNormSimpleModeState(state)));
+  }catch(_){ }
+}
+
+function dpSimpleStateAmount(state){
+  const st = dpNormSimpleModeState(state);
+  return Math.max(
+    (st.fold|0) / 100,
+    Math.abs(st.skew|0) / 100,
+    (st.sat|0) / 100,
+    (st.crush|0) / 100,
+    (st.pwm|0) / 100,
+    (st.pd|0) / 100,
+    Math.abs(st.tone|0) / 100,
+    (st.smear|0) / 100
+  );
+}
+
+function dpSimpleValueText(id, value){
+  const v = parseInt(value, 10) || 0;
+  if (id === 'skew' || id === 'tone'){
+    return (v > 0 ? '+' : '') + String(v);
+  }
+  return String(v);
+}
+
+function dpSimpleIsNeutral(state){
+  const st = dpNormSimpleModeState(state);
+  if (st.morph !== 'linear') return false;
+  return DP_SIMPLE_MODE_CONTROLS.every((ctl)=> (st[ctl.id]|0) === (ctl.neutral|0));
+}
+
+function dpSimpleWaveMatches(a, b){
+  const aa = (a instanceof Uint8Array) ? a : new Uint8Array(a||[]);
+  const bb = (b instanceof Uint8Array) ? b : new Uint8Array(b||[]);
+  const N = aa.length|0;
+  if (N !== (bb.length|0)) return false;
+  for (let i=0;i<N;i++){
+    if (aa[i] !== bb[i]) return false;
+  }
+  return true;
+}
+
+function dpApplySimpleModeStateU8(baseU8, state){
+  const base = (baseU8 instanceof Uint8Array) ? new Uint8Array(baseU8) : new Uint8Array(baseU8||[]);
+  const st = dpNormSimpleModeState(state);
+  const morphInfo = dpSimpleMorphInfo(st.morph);
+  if (!base.length) return base;
+
+  let out = new Uint8Array(base);
+  if ((st.fold|0) !== 0 && typeof dpSimpleWavefoldU8 === 'function'){
+    out = dpSimpleWavefoldU8(out, (st.fold|0) / 100);
+  }
+  if ((st.skew|0) !== 0 && typeof dpSimpleSkewU8 === 'function'){
+    out = dpSimpleSkewU8(out, (st.skew|0) / 100);
+  }
+  if ((st.sat|0) !== 0 && typeof dpSimpleSaturateU8 === 'function'){
+    out = dpSimpleSaturateU8(out, (st.sat|0) / 100);
+  }
+  if ((st.crush|0) !== 0 && typeof dpSimpleCrushU8 === 'function'){
+    out = dpSimpleCrushU8(out, (st.crush|0) / 100);
+  }
+  if ((st.pwm|0) !== 0 && typeof dpEvolveGenerate === 'function'){
+    out = dpEvolveGenerate(out, 0.5 + (((st.pwm|0) / 100) * 0.5), 'pwm');
+  }
+  if ((st.pd|0) !== 0 && typeof dpEvolveGenerate === 'function'){
+    out = dpEvolveGenerate(out, (st.pd|0) / 100, 'pdwarp');
+  }
+  if ((st.tone|0) !== 0 && typeof dpSimpleToneU8 === 'function'){
+    out = dpSimpleToneU8(out, (st.tone|0) / 100);
+  }
+  if ((st.smear|0) !== 0 && typeof dpEvolveGenerate === 'function'){
+    out = dpEvolveGenerate(out, (st.smear|0) / 100, 'specsmear');
+  }
+
+  const target = out;
+  const morphAmt = dpSimpleStateAmount(st);
+  if (morphAmt > 1e-6){
+    if (morphInfo.blend === 'spectral' && typeof dpSimpleSpectralMorphU8 === 'function'){
+      out = dpSimpleSpectralMorphU8(base, target, morphAmt);
+    } else if (morphInfo.blend === 'phaseWarp' && typeof dpSimplePhaseWarpMorphU8 === 'function'){
+      out = dpSimplePhaseWarpMorphU8(base, target, morphAmt);
+    } else if (morphInfo.blend === 'equalPower' && typeof dpSimpleEqualPowerMorphU8 === 'function'){
+      out = dpSimpleEqualPowerMorphU8(base, target, morphAmt);
+    } else if (morphInfo.blend === 'magnitudeOnly' && typeof dpSimpleMagnitudeOnlyMorphU8 === 'function'){
+      out = dpSimpleMagnitudeOnlyMorphU8(base, target, morphAmt);
+    } else if (morphInfo.blend === 'phaseOnly' && typeof dpSimplePhaseOnlyMorphU8 === 'function'){
+      out = dpSimplePhaseOnlyMorphU8(base, target, morphAmt);
+    } else {
+      out = target;
+    }
+  }
+
+  if (typeof dpBlendU8 === 'function'){
+    const toneAmt = (st.tone|0) / 100;
+    const toneTopUp = dpSimplePostBlendWeight('tone', st.morph, toneAmt);
+    if (toneTopUp > 1e-6 && typeof dpSimpleToneU8 === 'function'){
+      out = dpBlendU8(out, dpSimpleToneU8(out, toneAmt), toneTopUp);
+    }
+
+    const smearAmt = (st.smear|0) / 100;
+    const smearTopUp = dpSimplePostBlendWeight('smear', st.morph, smearAmt);
+    if (smearTopUp > 1e-6 && typeof dpEvolveGenerate === 'function'){
+      out = dpBlendU8(out, dpEvolveGenerate(out, smearAmt, 'specsmear'), smearTopUp);
+    }
+  }
+
+  return out;
+}
+
+function dpSimpleEase01(t){
+  t = Number(t);
+  if (!isFinite(t)) t = 0;
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  return t * t * (3 - (2 * t));
+}
+
+function dpSimplePositionalAmount(index, count, distribution){
+  const total = Math.max(1, count|0);
+  if (total <= 1) return 1;
+  if (distribution === 'pingPong'){
+    const u = ((index|0) + 0.5) / total;
+    return dpSimpleEase01(1 - Math.abs((2 * u) - 1));
+  }
+  if (distribution === 'centerOut'){
+    const u = ((index|0) + 0.5) / total;
+    return dpSimpleEase01(Math.abs((2 * u) - 1));
+  }
+  const denom = Math.max(1, total - 1);
+  return dpSimpleEase01((index|0) / denom);
+}
+
+function dpSimpleDistributedValue(ctl, rawValue, positionalAmt){
+  const value = rawValue|0;
+  if (value === 0) return 0;
+
+  const cfg = DP_SIMPLE_CONTROL_DISTRIBUTION[ctl.id] || { mode:'fanout' };
+  let weight = 1;
+  if (cfg.mode === 'fanout'){
+    weight = positionalAmt;
+  } else if (cfg.mode === 'hybrid'){
+    const floor = Math.max(0, Math.min(1, Number(cfg.floor)));
+    weight = floor + ((1 - floor) * positionalAmt);
+  }
+  return Math.max(ctl.min, Math.min(ctl.max, Math.round(value * weight)));
+}
+
+function dpSimpleFanoutState(state, index, count){
+  const st = dpNormSimpleModeState(state);
+  if ((count|0) <= 1) return st;
+
+  const morphInfo = dpSimpleMorphInfo(st.morph);
+  const positionalAmt = dpSimplePositionalAmount(index, count, morphInfo.distribution);
+  const out = Object.assign({}, st);
+
+  for (const ctl of DP_SIMPLE_MODE_CONTROLS){
+    out[ctl.id] = dpSimpleDistributedValue(ctl, st[ctl.id], positionalAmt);
+  }
+
+  return out;
+}
+
+const SIMPLE_MODE_STATE = root.__digiproSimpleModeState
+  ? dpNormSimpleModeState(root.__digiproSimpleModeState)
+  : dpLoadSimpleModeState();
+root.__digiproSimpleModeState = SIMPLE_MODE_STATE;
+
+const SIMPLE_MODE_RUNTIME = root.__digiproSimpleModeRuntime || {
+  source: null,
+  sources: Object.create(null),
+  gesture: null,
+  raf: 0,
+  pendingPreview: false,
+  pendingBase: null,
+  pendingPaint: null,
+  pendingTouch: null,
+  pendingLabel: 'Table Mode'
+};
+if (!SIMPLE_MODE_RUNTIME.sources || typeof SIMPLE_MODE_RUNTIME.sources !== 'object'){
+  SIMPLE_MODE_RUNTIME.sources = Object.create(null);
+}
+root.__digiproSimpleModeRuntime = SIMPLE_MODE_RUNTIME;
+
+function dpPersistSimpleModeState(next, opts){
+  Object.assign(SIMPLE_MODE_STATE, dpNormSimpleModeState(next || SIMPLE_MODE_STATE));
+  root.__digiproSimpleModeState = SIMPLE_MODE_STATE;
+  if (!(opts && opts.skipStorage)) dpSaveSimpleModeState(SIMPLE_MODE_STATE);
+  return SIMPLE_MODE_STATE;
+}
+
+function dpResetSimpleModeRuntime(){
+  if (SIMPLE_MODE_RUNTIME.raf){
+    try{ cancelAnimationFrame(SIMPLE_MODE_RUNTIME.raf); }catch(_){ }
+  }
+  SIMPLE_MODE_RUNTIME.raf = 0;
+  SIMPLE_MODE_RUNTIME.gesture = null;
+  SIMPLE_MODE_RUNTIME.pendingPreview = false;
+  SIMPLE_MODE_RUNTIME.pendingBase = null;
+  SIMPLE_MODE_RUNTIME.pendingPaint = null;
+  SIMPLE_MODE_RUNTIME.pendingTouch = null;
+}
+
+root.__digiproCaptureSimpleModeState = function(){
+  return dpNormSimpleModeState(SIMPLE_MODE_STATE);
+};
+
+root.__digiproApplySimpleModeState = function(next){
+  dpResetSimpleModeRuntime();
+  return dpPersistSimpleModeState(next || dpSimpleDefaultState());
+};
+
 
 // -------------- editor UI --------------
 
   function renderEditorBar(){
     const bar = bySel('#digiproEditorBar');
     bar.innerHTML = '';
+    if (SIMPLE_MODE_RUNTIME.raf){
+      try{ cancelAnimationFrame(SIMPLE_MODE_RUNTIME.raf); }catch(_){ }
+      SIMPLE_MODE_RUNTIME.raf = 0;
+    }
+    SIMPLE_MODE_RUNTIME.pendingBase = null;
+    SIMPLE_MODE_RUNTIME.pendingPaint = null;
+    SIMPLE_MODE_RUNTIME.pendingTouch = null;
+    SIMPLE_MODE_RUNTIME.pendingPreview = false;
 
     const left = el('div','mm-digi-editor');
     const canv = editorCanvas = el('canvas');
     const wavetableCanv = wavetableCanvas = el('canvas');
     const toolsWrap = el('div','mm-tools-wrap');
+    const statusRow = el('div','mm-tools-status');
     const historyRow = el('div','mm-history-row');
+    const toolsSwap = el('div','mm-tools-swap');
     const tools = el('div','mm-fx-grid');
+    const simplePanel = el('div','mm-simple-panel');
     const toolsBottom = el('div','mm-tools-bottom');
 
     // === PATCH: Undo/Redo UI
@@ -504,6 +853,418 @@ const viewNorm = false;
 
       updateButtonsState();
     }
+
+    function simpleCopyU8(src){
+      const out = (src instanceof Uint8Array) ? new Uint8Array(src) : new Uint8Array(src || []);
+      try{
+        if (src && src.displayRot !== undefined) out.displayRot = src.displayRot|0;
+      }catch(_){ }
+      return out;
+    }
+
+    function simpleSlotSnapshot(slot){
+      slot = slot|0;
+      const editorSlot = EDIT.slot|0;
+      const libRec = LIB.waves[slot] || null;
+      const hasLibWave = !!(libRec && libRec.dataU8 && libRec.dataU8.length);
+      const isDirtyActive = slot === editorSlot
+        && !!(LIB.dirty && LIB.dirty.has && LIB.dirty.has(slot))
+        && !!(EDIT && EDIT.dataU8 && EDIT.dataU8.length);
+
+      if (isDirtyActive){
+        let hasUnsavedWave = hasLibWave;
+        if (!hasUnsavedWave){
+          if (typeof isSilentU8 === 'function') hasUnsavedWave = !isSilentU8(EDIT.dataU8);
+          else {
+            hasUnsavedWave = false;
+            for (let i=0;i<(EDIT.dataU8.length|0);i++){
+              if ((EDIT.dataU8[i]|0) !== 128){ hasUnsavedWave = true; break; }
+            }
+          }
+        }
+        if (!hasUnsavedWave) return null;
+        return {
+          slot,
+          name: String(EDIT.name || 'WAVE'),
+          heat: (typeof EDIT._dpHeat === 'number' && isFinite(EDIT._dpHeat) && EDIT._dpHeat > 0) ? EDIT._dpHeat : 1,
+          dataU8: simpleCopyU8(EDIT.dataU8)
+        };
+      }
+
+      if (!hasLibWave) return null;
+
+      return {
+        slot,
+        name: String(libRec.name || 'WAVE'),
+        heat: (typeof libRec._dpHeat === 'number' && isFinite(libRec._dpHeat) && libRec._dpHeat > 0) ? libRec._dpHeat : 1,
+        dataU8: simpleCopyU8(libRec.dataU8)
+      };
+    }
+
+    function resolveSimpleTargets(){
+      const sel = Array.from(SELECTED || [])
+        .map(n=>n|0)
+        .filter(s=>s>=0 && s<64)
+        .sort((a,b)=>a-b);
+      const scope = sel.length ? 'selected' : 'wavetable';
+      const candidates = sel.length ? sel : Array.from({length:64}, (_, idx)=>idx|0);
+      const targets = [];
+      const liveBySlot = Object.create(null);
+
+      for (const slot of candidates){
+        const snap = simpleSlotSnapshot(slot);
+        if (!snap) continue;
+        targets.push(slot|0);
+        liveBySlot[slot] = snap;
+      }
+
+      return { scope, targets, liveBySlot };
+    }
+
+    function captureSimpleBase(liveRec, index, count){
+      if (!liveRec || !liveRec.dataU8 || !liveRec.dataU8.length) return null;
+
+      const slot = liveRec.slot|0;
+      const cached = SIMPLE_MODE_RUNTIME.sources ? SIMPLE_MODE_RUNTIME.sources[slot] : null;
+      const slotState = dpSimpleFanoutState(SIMPLE_MODE_STATE, index, count);
+
+      if (cached && cached.dataU8 && cached.dataU8.length === liveRec.dataU8.length){
+        const expected = dpApplySimpleModeStateU8(cached.dataU8, slotState);
+        if (dpSimpleWaveMatches(expected, liveRec.dataU8)){
+          return {
+            slot,
+            name: liveRec.name,
+            heat: liveRec.heat,
+            dataU8: simpleCopyU8(cached.dataU8)
+          };
+        }
+      }
+
+      const fresh = simpleCopyU8(liveRec.dataU8);
+      SIMPLE_MODE_RUNTIME.sources[slot] = { dataU8: simpleCopyU8(fresh) };
+      SIMPLE_MODE_RUNTIME.source = { slot, dataU8: simpleCopyU8(fresh) };
+      return {
+        slot,
+        name: liveRec.name,
+        heat: liveRec.heat,
+        dataU8: fresh
+      };
+    }
+
+    function applyPendingSimplePreview(){
+      SIMPLE_MODE_RUNTIME.pendingPreview = false;
+      SIMPLE_MODE_RUNTIME.pendingBase = null;
+      SIMPLE_MODE_RUNTIME.pendingPaint = null;
+      SIMPLE_MODE_RUNTIME.pendingTouch = null;
+
+      const gesture = SIMPLE_MODE_RUNTIME.gesture;
+      if (!gesture || !gesture.targets || !gesture.targets.length) return false;
+
+      const targets = gesture.targets;
+      const targetCount = targets.length|0;
+      const editorSlot = EDIT.slot|0;
+      let activeTouched = false;
+      let changed = false;
+
+      for (let i=0;i<targetCount;i++){
+        const slot = targets[i]|0;
+        const baseRec = gesture.baseBySlot[slot];
+        if (!baseRec || !baseRec.dataU8 || !baseRec.dataU8.length) continue;
+
+        const liveRec = simpleSlotSnapshot(slot);
+        const slotState = dpSimpleFanoutState(SIMPLE_MODE_STATE, i, targetCount);
+        const nextU8 = dpApplySimpleModeStateU8(baseRec.dataU8, slotState);
+        if (!liveRec || !dpSimpleWaveMatches(nextU8, liveRec.dataU8)) changed = true;
+
+        const rec = attachDisplayRot({ name: baseRec.name, dataU8: nextU8, user:true }, false);
+        rec._dpHeat = baseRec.heat;
+        LIB.waves[slot] = rec;
+        LIB.userWaves[slot] = rec;
+
+        if (slot === editorSlot){
+          activeTouched = true;
+          EDIT.name = baseRec.name;
+          EDIT._dpHeat = baseRec.heat;
+          EDIT.dataU8 = simpleCopyU8(rec.dataU8);
+          if (nameIn) nameIn.value = (EDIT.name || 'WAVE').toUpperCase();
+        }
+
+        paintGridCell(slot);
+      }
+
+      if (activeTouched) paint();
+      try{ if (typeof requestWavetableViewportDraw === 'function') requestWavetableViewportDraw(); }catch(_){ }
+      if (changed) gesture.changed = true;
+      return changed;
+    }
+
+    function flushSimplePreview(){
+      if (SIMPLE_MODE_RUNTIME.raf){
+        try{ cancelAnimationFrame(SIMPLE_MODE_RUNTIME.raf); }catch(_){ }
+        SIMPLE_MODE_RUNTIME.raf = 0;
+      }
+      return applyPendingSimplePreview();
+    }
+
+    function scheduleSimplePreview(label){
+      SIMPLE_MODE_RUNTIME.pendingPreview = true;
+      SIMPLE_MODE_RUNTIME.pendingLabel = label || 'Table Mode';
+      if (SIMPLE_MODE_RUNTIME.raf) return;
+      SIMPLE_MODE_RUNTIME.raf = requestAnimationFrame(()=>{
+        SIMPLE_MODE_RUNTIME.raf = 0;
+        applyPendingSimplePreview();
+      });
+    }
+
+    function beginSimpleGesture(label){
+      if (SIMPLE_MODE_RUNTIME.gesture) return SIMPLE_MODE_RUNTIME.gesture;
+
+      const resolved = resolveSimpleTargets();
+      const targets = resolved.targets || [];
+      if (!targets.length) return null;
+
+      const baseBySlot = Object.create(null);
+      for (let i=0;i<targets.length;i++){
+        const slot = targets[i]|0;
+        const baseRec = captureSimpleBase(resolved.liveBySlot[slot], i, targets.length);
+        if (baseRec) baseBySlot[slot] = baseRec;
+      }
+
+      SIMPLE_MODE_RUNTIME.gesture = {
+        scope: resolved.scope,
+        targets,
+        baseBySlot,
+        before: captureBankState(targets, { preferEditor:true, includeSimpleMode:true }),
+        label: label || 'Table Mode',
+        changed: false
+      };
+      return SIMPLE_MODE_RUNTIME.gesture;
+    }
+
+    function commitSimpleGesture(label){
+      const gesture = SIMPLE_MODE_RUNTIME.gesture;
+      flushSimplePreview();
+      SIMPLE_MODE_RUNTIME.gesture = null;
+      if (!gesture || !gesture.changed || !gesture.targets || !gesture.targets.length) return;
+
+      const editorSlot = EDIT.slot|0;
+      const activeTouched = gesture.targets.includes(editorSlot);
+
+      for (const slot of gesture.targets){
+        LIB.dirty.delete(slot|0);
+        paintGridCell(slot|0);
+      }
+
+      if (activeTouched){
+        const rec = LIB.waves[editorSlot] || null;
+        if (rec && rec.dataU8 && rec.dataU8.length){
+          EDIT.name = String(rec.name || EDIT.name || 'WAVE');
+          EDIT._dpHeat = (typeof rec._dpHeat === 'number' && isFinite(rec._dpHeat) && rec._dpHeat > 0) ? rec._dpHeat : 1;
+          EDIT.dataU8 = simpleCopyU8(rec.dataU8);
+          if (nameIn) nameIn.value = (EDIT.name || 'WAVE').toUpperCase();
+          paint();
+        }
+      }
+
+      const after = captureBankState(gesture.targets, { includeSimpleMode:true });
+      if (gesture.before){
+        bankPush({
+          label: label || gesture.label || 'Table Mode',
+          before: gesture.before,
+          after
+        });
+      }
+      if (activeTouched) resetUndoToCurrent(true);
+      if (typeof announceIO === 'function' && !(JOB && JOB.running)){
+        const scopeLabel = (gesture.scope === 'selected')
+          ? `${gesture.targets.length} selected slot${gesture.targets.length===1 ? '' : 's'}`
+          : `${gesture.targets.length} filled slot${gesture.targets.length===1 ? '' : 's'}`;
+        announceIO(`${label || gesture.label || 'Table Mode'} applied to ${scopeLabel}.`);
+      }
+      updateButtonsState();
+      try{ if (typeof requestWavetableViewportDraw === 'function') requestWavetableViewportDraw(); }catch(_){ }
+    }
+
+    const simpleTop = el('div','mm-simple-top');
+    const simpleModeToggle = el('button','btn btn-small mm-simple-toggle');
+    simpleModeToggle.type = 'button';
+    simpleModeToggle.textContent = 'Table Mode';
+    const simpleMorphWrap = el('label','mm-simple-morph');
+    const simpleMorphLabel = el('span','mm-simple-morph-label');
+    simpleMorphLabel.textContent = 'Morph';
+    const simpleMorphSelect = el('select','mm-simple-morph-select');
+    DP_SIMPLE_MORPH_OPTIONS.forEach(([value, label])=>{
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      simpleMorphSelect.appendChild(opt);
+    });
+    simpleMorphWrap.append(simpleMorphLabel, simpleMorphSelect);
+
+    const simpleReset = el('button','btn btn-small mm-simple-reset');
+    simpleReset.type = 'button';
+    simpleReset.textContent = 'Reset';
+    simpleReset.title = 'Reset Table Mode controls to their neutral defaults.';
+
+    const simpleSliders = el('div','mm-simple-sliders');
+    const simpleRefs = new Map();
+
+    function refreshSimpleControls(){
+      try{ simpleMorphSelect.value = SIMPLE_MODE_STATE.morph; }catch(_){ }
+      for (const ctl of DP_SIMPLE_MODE_CONTROLS){
+        const ref = simpleRefs.get(ctl.id);
+        if (!ref) continue;
+        const v = SIMPLE_MODE_STATE[ctl.id]|0;
+        const disabledReason = dpSimpleControlDisabledReason(ctl.id, SIMPLE_MODE_STATE.morph);
+        const isDisabled = !!disabledReason;
+        ref.input.value = String(v);
+        ref.input.disabled = isDisabled;
+        ref.input.setAttribute('aria-valuetext', dpSimpleValueText(ctl.id, v));
+        ref.input.title = isDisabled ? disabledReason : `${ctl.label}: ${dpSimpleValueText(ctl.id, v)}`;
+        ref.value.textContent = dpSimpleValueText(ctl.id, v);
+        if (ref.card){
+          ref.card.classList.toggle('is-disabled', isDisabled);
+          ref.card.setAttribute('aria-disabled', isDisabled ? 'true' : 'false');
+          ref.card.title = isDisabled ? disabledReason : '';
+        }
+      }
+      simpleReset.disabled = dpSimpleIsNeutral(SIMPLE_MODE_STATE);
+    }
+
+    function syncSimpleModeUi(){
+      const isSimple = SIMPLE_MODE_STATE.mode === 'simple';
+      const toggleTitle = isSimple
+        ? 'Table Mode is active. Click to return to the classic FX grid. Shortcut: Shift-click the status line.'
+        : 'Classic FX grid is active. Click to open Table Mode. Shortcut: Shift-click the status line.';
+      if (statusRow){
+        statusRow.classList.toggle('is-simple', isSimple);
+        statusRow.title = toggleTitle;
+      }
+      if (ioMsgEl) ioMsgEl.title = toggleTitle;
+      if (simpleModeToggle){
+        simpleModeToggle.setAttribute('aria-pressed', isSimple ? 'true' : 'false');
+        simpleModeToggle.title = toggleTitle;
+      }
+      tools.hidden = false;
+      simplePanel.hidden = false;
+      tools.style.display = isSimple ? 'none' : 'grid';
+      simplePanel.style.display = isSimple ? 'flex' : 'none';
+      simplePanel.classList.toggle('is-active', isSimple);
+      refreshSimpleControls();
+    }
+
+    function applySimpleImmediate(label){
+      beginSimpleGesture(label);
+      scheduleSimplePreview(label);
+      commitSimpleGesture(label);
+      syncSimpleModeUi();
+    }
+
+    function toggleSimpleMode(){
+      commitSimpleGesture();
+      if (SIMPLE_MODE_STATE.mode === 'simple'){
+        dpPersistSimpleModeState(Object.assign({}, SIMPLE_MODE_STATE, { mode:'classic' }));
+      } else {
+        // Enter each Simple Mode session from a neutral control state so any
+        // previously saved slider values never reshape the current wavetable implicitly.
+        const next = dpSimpleDefaultState();
+        next.mode = 'simple';
+        dpPersistSimpleModeState(next);
+      }
+      syncSimpleModeUi();
+    }
+
+    statusRow.onclick = (ev)=>{
+      if (ev && ev.shiftKey){
+        ev.preventDefault();
+        toggleSimpleMode();
+      }
+    };
+
+    simpleModeToggle.addEventListener('click', (ev)=>{
+      if (ev){
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+      toggleSimpleMode();
+    });
+
+    simpleMorphSelect.addEventListener('change', ()=>{
+      beginSimpleGesture('Simple Morph');
+      dpPersistSimpleModeState(Object.assign({}, SIMPLE_MODE_STATE, {
+        morph: simpleMorphSelect.value
+      }));
+      applySimpleImmediate('Simple Morph');
+    });
+
+    simpleReset.onclick = ()=>{
+      beginSimpleGesture('Simple Reset');
+      const next = dpSimpleDefaultState();
+      next.mode = SIMPLE_MODE_STATE.mode;
+      dpPersistSimpleModeState(next);
+      applySimpleImmediate('Simple Reset');
+    };
+
+    for (const ctl of DP_SIMPLE_MODE_CONTROLS){
+      const card = el('div','mm-simple-slider');
+      const labelEl = el('div','mm-simple-slider-label');
+      labelEl.textContent = ctl.label;
+      const track = el('div','mm-simple-slider-track');
+      const input = el('input','mm-simple-range');
+      input.type = 'range';
+      input.min = String(ctl.min);
+      input.max = String(ctl.max);
+      input.step = String(ctl.step || 1);
+      input.value = String(SIMPLE_MODE_STATE[ctl.id]|0);
+      input.setAttribute('aria-label', `${ctl.label} amount`);
+      input.setAttribute('orient', 'vertical');
+      input.setAttribute('aria-valuetext', dpSimpleValueText(ctl.id, SIMPLE_MODE_STATE[ctl.id]|0));
+      input.title = `${ctl.label}: ${dpSimpleValueText(ctl.id, SIMPLE_MODE_STATE[ctl.id]|0)}`;
+      const valueEl = el('div','mm-simple-slider-value');
+      valueEl.textContent = dpSimpleValueText(ctl.id, SIMPLE_MODE_STATE[ctl.id]|0);
+
+      const gestureLabel = `Simple ${ctl.label}`;
+      const startGesture = ()=>{
+        if (!SIMPLE_MODE_RUNTIME.gesture) beginSimpleGesture(gestureLabel);
+      };
+      const finishGesture = ()=>{
+        commitSimpleGesture(gestureLabel);
+        syncSimpleModeUi();
+      };
+
+      input.addEventListener('pointerdown', ()=>{ startGesture(); });
+      input.addEventListener('input', ()=>{
+        startGesture();
+        const nextValue = Math.max(ctl.min, Math.min(ctl.max, parseInt(input.value, 10) || 0));
+        dpPersistSimpleModeState(Object.assign({}, SIMPLE_MODE_STATE, { [ctl.id]: nextValue }));
+        valueEl.textContent = dpSimpleValueText(ctl.id, nextValue);
+        input.setAttribute('aria-valuetext', dpSimpleValueText(ctl.id, nextValue));
+        input.title = `${ctl.label}: ${dpSimpleValueText(ctl.id, nextValue)}`;
+        simpleReset.disabled = dpSimpleIsNeutral(SIMPLE_MODE_STATE);
+        scheduleSimplePreview(gestureLabel);
+      });
+      input.addEventListener('change', finishGesture);
+      input.addEventListener('pointerup', finishGesture);
+      input.addEventListener('pointercancel', finishGesture);
+      input.addEventListener('blur', ()=>{
+        if (SIMPLE_MODE_RUNTIME.gesture) finishGesture();
+      });
+
+      track.appendChild(input);
+      card.append(labelEl, track, valueEl);
+      simpleSliders.appendChild(card);
+      simpleRefs.set(ctl.id, { card, input, value: valueEl });
+    }
+
+    root.__digiproBeforeUndoRedo = ()=>{
+      if (!SIMPLE_MODE_RUNTIME.gesture && !SIMPLE_MODE_RUNTIME.raf) return;
+      commitSimpleGesture();
+      syncSimpleModeUi();
+    };
+
+    simpleTop.append(simpleMorphWrap, simpleReset);
+    simplePanel.append(simpleTop, simpleSliders);
+    toolsSwap.append(tools, simplePanel);
 
     // ---- editor tools ----
     const btnSmooth = el('button'); btnSmooth.textContent = 'Smooth';
@@ -5075,6 +5836,8 @@ btnExportBankZip.onclick = async (ev)=>{
 // Inline IO / reminder message
 ioMsgEl = el('div','mm-io-msg');
 ioMsgEl.textContent = 'Ready';
+ioMsgEl.setAttribute('role', 'status');
+ioMsgEl.setAttribute('aria-live', 'polite');
 
     // No dedicated Cancel button — the job-start button becomes “Cancel” while running.
 
@@ -12602,12 +13365,11 @@ Shift‑click to choose slots/mode/seam/FX.`;
     // Right column: tools panel spans height of left stack
     const rightPane = el('div','mm-digi-rightpane');
 
-    // Status row (Cancel + Ready) inside tools panel
-    const statusRow = el('div','mm-tools-status');
-    statusRow.append(ioMsgEl);
+    // Status row inside tools panel
+    statusRow.append(ioMsgEl, simpleModeToggle);
 
     toolsWrap.innerHTML = '';
-    toolsWrap.append(statusRow, tools, historyRow, rowMutate, rowBatch, rowBlend, rowNorm, rowSave);
+    toolsWrap.append(statusRow, toolsSwap, historyRow, rowMutate, rowBatch, rowBlend, rowNorm, rowSave);
 
     rightPane.appendChild(toolsWrap);
 
@@ -12705,6 +13467,7 @@ Shift‑click to choose slots/mode/seam/FX.`;
         if (nameIn){
           nameIn.value = (EDIT.name || 'WAVE').toUpperCase();
         }
+        try{ syncSimpleModeUi(); }catch(_){ }
         try{ syncWavetableTuneUi(); }catch(_){ }
 
         const refreshHeat = dpHeatOf(EDIT);
@@ -12728,6 +13491,7 @@ Shift‑click to choose slots/mode/seam/FX.`;
       }
     };
 
+    syncSimpleModeUi();
     updateButtonsState();
     updateUndoButtons();
   }

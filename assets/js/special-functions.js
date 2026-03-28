@@ -255,6 +255,268 @@ function dpBlendU8(a, b, t){
       return out;
     }
 
+function dpCloneU8(src){
+      return (src instanceof Uint8Array) ? new Uint8Array(src) : new Uint8Array(src||[]);
+    }
+
+function dpU8ToNormFloat(srcU8){
+      const src = (srcU8 instanceof Uint8Array) ? srcU8 : new Uint8Array(srcU8||[]);
+      const N = src.length|0;
+      const out = new Float32Array(N);
+      for (let i=0;i<N;i++) out[i] = ((src[i]|0) - 128) / 127;
+      return out;
+    }
+
+function dpNormFloatToU8(srcF){
+      const src = (srcF instanceof Float32Array || srcF instanceof Float64Array) ? srcF : new Float32Array(srcF||[]);
+      const N = src.length|0;
+      const out = new Uint8Array(N);
+      for (let i=0;i<N;i++){
+        const v = Math.max(-1, Math.min(1, Number(src[i]) || 0));
+        out[i] = clamp(Math.round(v * 127 + 128), 0, 255);
+      }
+      return out;
+    }
+
+function dpSamplePeriodicFloat(srcF, phase){
+      const src = (srcF instanceof Float32Array || srcF instanceof Float64Array) ? srcF : new Float32Array(srcF||[]);
+      const N = src.length|0;
+      if (!N) return 0;
+      let p = Number(phase) || 0;
+      p = p - Math.floor(p);
+      let x = p * N;
+      if (x >= N) x = 0;
+      const i0 = x|0;
+      const i1 = (i0 + 1) % N;
+      const frac = x - i0;
+      return src[i0] * (1 - frac) + src[i1] * frac;
+    }
+
+function dpSimpleWavefoldU8(srcU8, amount){
+      const src = (srcU8 instanceof Uint8Array) ? srcU8 : new Uint8Array(srcU8||[]);
+      const N = src.length|0;
+      const amt = _clamp01(Number(amount||0));
+      if (!N || amt <= 1e-6) return dpCloneU8(src);
+
+      const drive = 1 + amt * 4.6;
+      const thr = 0.92 - amt * 0.54;
+      const clipDrive = 1 + amt * 0.55;
+      const clipNorm = Math.tanh(clipDrive) || 1;
+      const out = new Uint8Array(N);
+
+      function fold(x){
+        let y = x * drive;
+        while (y > thr || y < -thr){
+          y = (y > thr) ? (2 * thr - y) : (-2 * thr - y);
+        }
+        return Math.tanh(y * clipDrive) / clipNorm;
+      }
+
+      for (let i=0;i<N;i++){
+        const s = ((src[i]|0) - 128) / 127;
+        out[i] = clamp(Math.round(fold(s) * 127 + 128), 0, 255);
+      }
+      return out;
+    }
+
+function dpSimpleSkewU8(srcU8, amount){
+      const src = (srcU8 instanceof Uint8Array) ? srcU8 : new Uint8Array(srcU8||[]);
+      const N = src.length|0;
+      const amt = Math.max(-1, Math.min(1, Number(amount||0)));
+      if (!N || Math.abs(amt) <= 1e-6) return dpCloneU8(src);
+
+      const curve = 1 + Math.abs(amt) * 2.4;
+      const srcF = dpU8ToNormFloat(src);
+      const outF = new Float32Array(N);
+      for (let i=0;i<N;i++){
+        const t = i / Math.max(1, N);
+        const q = (amt < 0)
+          ? Math.pow(t, curve)
+          : (1 - Math.pow(1 - t, curve));
+        outF[i] = dpSamplePeriodicFloat(srcF, q);
+      }
+      return dpNormFloatToU8(outF);
+    }
+
+function dpSimpleSaturateU8(srcU8, amount){
+      const src = (srcU8 instanceof Uint8Array) ? srcU8 : new Uint8Array(srcU8||[]);
+      const N = src.length|0;
+      const amt = _clamp01(Number(amount||0));
+      if (!N || amt <= 1e-6) return dpCloneU8(src);
+
+      const drive = 1 + amt * 8.5;
+      const norm = Math.tanh(drive) || 1;
+      const out = new Uint8Array(N);
+      for (let i=0;i<N;i++){
+        const s = ((src[i]|0) - 128) / 127;
+        const y = Math.tanh(s * drive) / norm;
+        out[i] = clamp(Math.round(y * 127 + 128), 0, 255);
+      }
+      return out;
+    }
+
+function dpSimpleCrushU8(srcU8, amount){
+      const src = (srcU8 instanceof Uint8Array) ? srcU8 : new Uint8Array(srcU8||[]);
+      const N = src.length|0;
+      const amt = _clamp01(Number(amount||0));
+      if (!N || amt <= 1e-6) return dpCloneU8(src);
+
+      const bits = Math.max(2, Math.round(8 - (amt * 6)));
+      const levels = 1 << bits;
+      const mix = amt;
+      const out = new Uint8Array(N);
+      for (let i=0;i<N;i++){
+        const dry = src[i]|0;
+        const s = dry / 255;
+        const q = Math.round(s * (levels - 1)) / (levels - 1);
+        const wet = Math.round(q * 255);
+        out[i] = clamp(Math.round((dry * (1 - mix)) + (wet * mix)), 0, 255);
+      }
+      return out;
+    }
+
+function dpSimpleToneU8(srcU8, amount){
+      const src = (srcU8 instanceof Uint8Array) ? srcU8 : new Uint8Array(srcU8||[]);
+      const amt = Math.max(-1, Math.min(1, Number(amount||0)));
+      if (!src.length || Math.abs(amt) <= 1e-6) return dpCloneU8(src);
+      return spectralApplyU8(src, (re, im, N, H)=>specTilt(re, im, N, H, amt * 0.42));
+    }
+
+function dpAngleLerp(a, b, t){
+      const mix = _clamp01(Number(t||0));
+      const d = Math.atan2(Math.sin(b - a), Math.cos(b - a));
+      return a + (d * mix);
+    }
+
+function dpSimpleSpectralBlendCoreU8(baseU8, targetU8, amount, opts){
+      const base = (baseU8 instanceof Uint8Array) ? baseU8 : new Uint8Array(baseU8||[]);
+      const target = (targetU8 instanceof Uint8Array) ? targetU8 : new Uint8Array(targetU8||[]);
+      const mix = _clamp01(Number(amount||0));
+      if (!base.length || !target.length || base.length !== target.length) return dpCloneU8(target);
+      if (mix <= 1e-6) return dpCloneU8(target);
+
+      const cfg = (opts && typeof opts === 'object') ? opts : {};
+      const A = dftRealU8(base);
+      const B = dftRealU8(target);
+      const N = A.re.length|0;
+      const H = N >> 1;
+      const re = new Float64Array(N);
+      const im = new Float64Array(N);
+
+      const magMix = _clamp01((typeof cfg.magMix === 'function') ? cfg.magMix(mix) : (cfg.magMix == null ? mix : cfg.magMix));
+      const phaseMix = _clamp01((typeof cfg.phaseMix === 'function') ? cfg.phaseMix(mix) : (cfg.phaseMix == null ? mix : cfg.phaseMix));
+      const dcMix = _clamp01((typeof cfg.dcMix === 'function') ? cfg.dcMix(mix) : (cfg.dcMix == null ? magMix : cfg.dcMix));
+      const nyquistMix = _clamp01((typeof cfg.nyquistMix === 'function') ? cfg.nyquistMix(mix) : (cfg.nyquistMix == null ? magMix : cfg.nyquistMix));
+
+      re[0] = (A.re[0] * (1 - dcMix)) + (B.re[0] * dcMix);
+      im[0] = 0;
+      if ((N & 1) === 0){
+        re[H] = (A.re[H] * (1 - nyquistMix)) + (B.re[H] * nyquistMix);
+        im[H] = 0;
+      }
+
+      for (let k=1;k<H;k++){
+        const ma = Math.hypot(A.re[k], A.im[k]);
+        const mb = Math.hypot(B.re[k], B.im[k]);
+        const pa = Math.atan2(A.im[k], A.re[k]);
+        const pb = Math.atan2(B.im[k], B.re[k]);
+        const mag = (ma * (1 - magMix)) + (mb * magMix);
+        const ph = dpAngleLerp(pa, pb, phaseMix);
+        re[k] = mag * Math.cos(ph);
+        im[k] = mag * Math.sin(ph);
+      }
+
+      enforceConjugateSym(re, im);
+      return idftToU8(re, im);
+    }
+
+function dpSimpleSpectralMorphU8(baseU8, targetU8, amount){
+      return dpSimpleSpectralBlendCoreU8(baseU8, targetU8, amount, {
+        magMix: (mix)=>0.58 + (mix * 0.42),
+        phaseMix: (mix)=>0.18 + (mix * 0.52),
+        dcMix: (mix)=>mix,
+        nyquistMix: (mix)=>mix
+      });
+    }
+
+function dpSimpleEqualPowerMorphU8(baseU8, targetU8, amount){
+      const base = (baseU8 instanceof Uint8Array) ? baseU8 : new Uint8Array(baseU8||[]);
+      const target = (targetU8 instanceof Uint8Array) ? targetU8 : new Uint8Array(targetU8||[]);
+      const mix = _clamp01(Number(amount||0));
+      if (!base.length || !target.length || base.length !== target.length) return dpCloneU8(target);
+      if (mix <= 1e-6) return dpCloneU8(target);
+
+      const N = base.length|0;
+      const baseF = dpU8ToNormFloat(base);
+      const targetF = dpU8ToNormFloat(target);
+      const theta = mix * Math.PI * 0.5;
+      const dry = Math.cos(theta);
+      const wet = Math.sin(theta);
+      const outF = new Float32Array(N);
+      let peak = 0;
+
+      for (let i=0;i<N;i++){
+        const y = (baseF[i] * dry) + (targetF[i] * wet);
+        outF[i] = y;
+        const ay = Math.abs(y);
+        if (ay > peak) peak = ay;
+      }
+      if (peak > 1.000001){
+        const inv = 1 / peak;
+        for (let i=0;i<N;i++) outF[i] *= inv;
+      }
+      return dpNormFloatToU8(outF);
+    }
+
+function dpSimpleMagnitudeOnlyMorphU8(baseU8, targetU8, amount){
+      return dpSimpleSpectralBlendCoreU8(baseU8, targetU8, amount, {
+        magMix: (mix)=>mix,
+        phaseMix: 0,
+        dcMix: (mix)=>mix,
+        nyquistMix: (mix)=>mix
+      });
+    }
+
+function dpSimplePhaseOnlyMorphU8(baseU8, targetU8, amount){
+      return dpSimpleSpectralBlendCoreU8(baseU8, targetU8, amount, {
+        magMix: 0,
+        phaseMix: (mix)=>mix,
+        dcMix: 0,
+        nyquistMix: 0
+      });
+    }
+
+function dpSimplePhaseWarpMorphU8(baseU8, targetU8, amount){
+      const base = (baseU8 instanceof Uint8Array) ? baseU8 : new Uint8Array(baseU8||[]);
+      const target = (targetU8 instanceof Uint8Array) ? targetU8 : new Uint8Array(targetU8||[]);
+      const mix = _clamp01(Number(amount||0));
+      if (!base.length || !target.length || base.length !== target.length) return dpCloneU8(target);
+      if (mix <= 1e-6) return dpCloneU8(target);
+
+      const N = base.length|0;
+      const baseF = dpU8ToNormFloat(base);
+      const targetF = dpU8ToNormFloat(target);
+      const warpGuide = new Float32Array(N);
+      for (let i=0;i<N;i++){
+        warpGuide[i] = (
+          targetF[(i - 1 + N) % N] +
+          targetF[i] +
+          targetF[(i + 1) % N]
+        ) / 3;
+      }
+
+      const depth = 0.018 + (mix * 0.11);
+      const warpBlend = 0.22 + (mix * 0.58);
+      const out = new Uint8Array(N);
+      for (let i=0;i<N;i++){
+        const p = i / Math.max(1, N);
+        const warped = dpSamplePeriodicFloat(baseF, p + (warpGuide[i] * depth));
+        const y = (targetF[i] * (1 - warpBlend)) + (warped * warpBlend);
+        out[i] = clamp(Math.round(Math.max(-1, Math.min(1, y)) * 127 + 128), 0, 255);
+      }
+      return out;
+    }
+
 
 // ---------------------------------------------------------------------------
 // Phase / seam helpers (for clickless chain playback)
@@ -3723,6 +3985,16 @@ function fxZero(a){
   _export('enforceConjugateSym', enforceConjugateSym);
   _export('spectralApplyU8', spectralApplyU8);
   _export('dpBlendU8', dpBlendU8);
+  _export('dpSimpleWavefoldU8', dpSimpleWavefoldU8);
+  _export('dpSimpleSkewU8', dpSimpleSkewU8);
+  _export('dpSimpleSaturateU8', dpSimpleSaturateU8);
+  _export('dpSimpleCrushU8', dpSimpleCrushU8);
+  _export('dpSimpleToneU8', dpSimpleToneU8);
+  _export('dpSimpleSpectralMorphU8', dpSimpleSpectralMorphU8);
+  _export('dpSimpleEqualPowerMorphU8', dpSimpleEqualPowerMorphU8);
+  _export('dpSimpleMagnitudeOnlyMorphU8', dpSimpleMagnitudeOnlyMorphU8);
+  _export('dpSimplePhaseOnlyMorphU8', dpSimplePhaseOnlyMorphU8);
+  _export('dpSimplePhaseWarpMorphU8', dpSimplePhaseWarpMorphU8);
   _export('dpRotateU8', dpRotateU8);
   _export('dpFindBestRisingZCIndexU8', dpFindBestRisingZCIndexU8);
   _export('dpRotateToRisingZC_U8', dpRotateToRisingZC_U8);

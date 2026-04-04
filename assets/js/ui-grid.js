@@ -482,6 +482,16 @@
     requestWavetableViewportDraw();
   }
 
+  function syncFocusedGridCellToActive(){
+    const activeEl = document.activeElement;
+    if (!(activeEl && activeEl.classList && activeEl.classList.contains('mm-digi-slot'))) return;
+    const cell = bySel(`.mm-digi-slot[data-idx="${activeIdx}"]`);
+    if (!cell || cell === activeEl) return;
+    try{ cell.focus({ preventScroll:true }); }catch(_){
+      try{ cell.focus(); }catch(_2){ }
+    }
+  }
+
   function maybeGuardBeforeSwitch(targetIdx, onProceed){
     // The old UX asked whether to Save / Discard / Duplicate before switching slots.
     // Testers found it disruptive; now we auto-save to the current slot (with full Undo support).
@@ -552,6 +562,90 @@
         requestWavetableViewportDraw();
       }
     }
+
+  function announceGridPreview(idx){
+    try{
+      if (!(JOB && JOB.running)){
+        const w = (LIB && LIB.waves) ? LIB.waves[idx|0] : null;
+        const ok = !!(w && w.dataU8 && w.dataU8.length && !isSilentU8(w.dataU8));
+        announceIO(ok ? `Preview slot ${idx+1}.` : `Slot ${idx+1} empty.`, !ok);
+      }
+    }catch(_){ }
+  }
+
+  function announceGridLoad(idx){
+    try{
+      if (!(JOB && JOB.running)){
+        const w = (LIB && LIB.waves) ? LIB.waves[idx|0] : null;
+        const ok = !!(w && w.dataU8 && w.dataU8.length && !isSilentU8(w.dataU8));
+        const nm = (EDIT && EDIT.name) ? String(EDIT.name).toUpperCase() : ((w && w.name) ? String(w.name).toUpperCase() : 'WAVE');
+        announceIO(ok ? `Loaded slot ${idx+1} ${nm}.` : `Loaded slot ${idx+1} (empty).`);
+      }
+    }catch(_){ }
+  }
+
+  function applyGridSlotGesture(idx, opts){
+    idx = clamp(idx|0, 0, 63);
+    opts = opts || {};
+
+    if (opts.altKey){
+      // Alt/Option-click previews without changing selection.
+      quickPreview(idx);
+      announceGridPreview(idx);
+      return;
+    }
+
+    if (opts.shiftKey){
+      // Keep keyboard focus/active tile aligned with selection gestures.
+      // (Shift/Ctrl selection previously didn't move activeIdx, which made
+      // copy/paste/evolve feel "random" because those ops key off activeIdx.)
+      activeIdx = idx;
+      ensureActiveHighlight();
+      rangeSelectTo(idx, !!(opts.ctrlKey || opts.metaKey));
+      try{
+        if (!(JOB && JOB.running)){
+          const n = (SELECTED && typeof SELECTED.size === 'number') ? (SELECTED.size|0) : 0;
+          announceIO(n<=0 ? 'Selection cleared.' : `${n} slot${n===1?'':'s'} selected.`);
+        }
+      }catch(_){ }
+      return;
+    }
+
+    if (opts.ctrlKey || opts.metaKey){
+      // Keep active tile aligned with the most recent selection click.
+      activeIdx = idx;
+      ensureActiveHighlight();
+      const was = (SELECTED && SELECTED.has) ? SELECTED.has(idx) : false;
+      toggleSelect(idx);
+      SELECT_ANCHOR = idx;
+      try{
+        if (!(JOB && JOB.running)){
+          const n = (SELECTED && typeof SELECTED.size === 'number') ? (SELECTED.size|0) : 0;
+          if (n<=0) announceIO('Selection cleared.');
+          else {
+            const now = (SELECTED && SELECTED.has) ? SELECTED.has(idx) : !was;
+            const verb = now ? 'Added' : 'Removed';
+            announceIO(`${verb} slot ${idx+1} (${n}).`);
+          }
+        }
+      }catch(_){ }
+      return;
+    }
+
+    // Plain click selects the slot (single-selection) and opens it in the editor.
+    // This makes batch operations (AMP/NORM, Mutate, Clear, etc.) behave intuitively:
+    //   - act on the clicked slot by default
+    //   - act on the whole bank only when nothing is selected (Esc / click background).
+    if (!(SELECTED.size === 1 && SELECTED.has(idx))){
+      clearSelection();
+      toggleSelect(idx, true);
+    }
+    SELECT_ANCHOR = idx;
+    maybeGuardBeforeSwitch(idx, ()=>{
+      openInEditor(idx);
+      announceGridLoad(idx);
+    });
+  }
 
   function toggleSelect(idx, force){
     idx = idx|0;
@@ -891,80 +985,7 @@ function buildGrid(){
       //   Ctrl/Cmd‑click: toggle individual selection
       //   Click: open in editor (clears selection unless clicking inside current selection)
       cell.addEventListener('click', (ev)=>{
-        const idx = i|0;
-        if (ev.altKey){
-          // Alt/Option-click previews without changing selection.
-          quickPreview(idx);
-          // Don't clobber long-running job progress messages.
-          try{
-            if (!(JOB && JOB.running)){
-              const w = (LIB && LIB.waves) ? LIB.waves[idx] : null;
-              const ok = !!(w && w.dataU8 && w.dataU8.length && !isSilentU8(w.dataU8));
-              announceIO(ok ? `Preview slot ${idx+1}.` : `Slot ${idx+1} empty.`, !ok);
-            }
-          }catch(_){ }
-          return;
-        }
-
-        // Shift = range select (optionally toggling range when Ctrl/Cmd is held)
-        if (ev.shiftKey){
-          // Keep keyboard focus/active tile aligned with selection gestures.
-          // (Shift/Ctrl selection previously didn't move activeIdx, which made
-          // copy/paste/evolve feel "random" because those ops key off activeIdx.)
-          activeIdx = idx;
-          ensureActiveHighlight();
-          rangeSelectTo(idx, (ev.ctrlKey || ev.metaKey));
-          try{
-            if (!(JOB && JOB.running)){
-              const n = (SELECTED && typeof SELECTED.size === 'number') ? (SELECTED.size|0) : 0;
-              announceIO(n<=0 ? 'Selection cleared.' : `${n} slot${n===1?'':'s'} selected.`);
-            }
-          }catch(_){ }
-          return;
-        }
-
-        // Ctrl/Cmd = toggle single-slot selection
-        if (ev.ctrlKey || ev.metaKey){
-          // Keep active tile aligned with the most recent selection click.
-          activeIdx = idx;
-          ensureActiveHighlight();
-          const was = (SELECTED && SELECTED.has) ? SELECTED.has(idx) : false;
-          toggleSelect(idx);
-          SELECT_ANCHOR = idx;
-          try{
-            if (!(JOB && JOB.running)){
-              const n = (SELECTED && typeof SELECTED.size === 'number') ? (SELECTED.size|0) : 0;
-              if (n<=0) announceIO('Selection cleared.');
-              else {
-                const now = (SELECTED && SELECTED.has) ? SELECTED.has(idx) : !was;
-                const verb = now ? 'Added' : 'Removed';
-                announceIO(`${verb} slot ${idx+1} (${n}).`);
-              }
-            }
-          }catch(_){ }
-          return;
-        }
-
-        // Plain click selects the slot (single-selection) and opens it in the editor.
-        // This makes batch operations (AMP/NORM, Mutate, Clear, etc.) behave intuitively:
-        //   - act on the clicked slot by default
-        //   - act on the whole bank only when nothing is selected (Esc / click background).
-        if (!(SELECTED.size === 1 && SELECTED.has(idx))){
-          clearSelection();
-          toggleSelect(idx, true);
-        }
-        SELECT_ANCHOR = idx;
-        maybeGuardBeforeSwitch(idx, ()=>{
-          openInEditor(idx);
-          try{
-            if (!(JOB && JOB.running)){
-              const w = (LIB && LIB.waves) ? LIB.waves[idx] : null;
-              const ok = !!(w && w.dataU8 && w.dataU8.length && !isSilentU8(w.dataU8));
-              const nm = (EDIT && EDIT.name) ? String(EDIT.name).toUpperCase() : ((w && w.name) ? String(w.name).toUpperCase() : 'WAVE');
-              announceIO(ok ? `Loaded slot ${idx+1} ${nm}.` : `Loaded slot ${idx+1} (empty).`);
-            }
-          }catch(_){ }
-        });
+        applyGridSlotGesture(i|0, ev);
       });
       // double-click = open + preview
       cell.addEventListener('dblclick', (ev)=>{
@@ -972,13 +993,7 @@ function buildGrid(){
         maybeGuardBeforeSwitch(idx, ()=>{
           openInEditor(idx);
           quickPreview(idx);
-          try{
-            if (!(JOB && JOB.running)){
-              const w = (LIB && LIB.waves) ? LIB.waves[idx] : null;
-              const ok = !!(w && w.dataU8 && w.dataU8.length && !isSilentU8(w.dataU8));
-              announceIO(ok ? `Preview slot ${idx+1}.` : `Slot ${idx+1} empty.`, !ok);
-            }
-          }catch(_){ }
+          announceGridPreview(idx);
         });
       });
 
@@ -1165,6 +1180,11 @@ cell.addEventListener('dragleave', ()=>{
       const editorHasWave = !!(EDIT.dataU8 && EDIT.dataU8.length && (LIB.dirty && LIB.dirty.has(editorSlot)));
       mutateSlider.disabled = !(anyWaves || editorHasWave);
     }
+    try{
+      if (typeof root.__digiproHandleSimpleModeSelectionChange === 'function'){
+        root.__digiproHandleSimpleModeSelectionChange({ selectedCount: SELECTED.size|0 });
+      }
+    }catch(_){ }
   }
 
   function bindKeyboard(){
@@ -2162,6 +2182,36 @@ cell.addEventListener('dragleave', ()=>{
       return true;
     }
 
+    function padsPreviewShortcutBlockedByTypingTarget(target){
+      const el = (target && target.nodeType === 1) ? target : (target && target.parentElement ? target.parentElement : null);
+      if (!el) return false;
+      try{
+        if (el.closest && el.closest('textarea,[contenteditable]:not([contenteditable="false"]),.mm-allow-select')) return true;
+        const input = el.closest ? el.closest('input') : null;
+        if (input){
+          const type = String(input.type || 'text').toLowerCase();
+          return !['range','button','checkbox','radio','submit','reset','color','file'].includes(type);
+        }
+      }catch(_){ }
+      return false;
+    }
+
+    document.addEventListener('keydown', (e)=>{
+      if (!digiproPanelIsVisible()) return;
+      if (KB_VIEW_MODE !== 'pads') return;
+      if (e.defaultPrevented) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!(e.code === 'Space' && e.shiftKey)) return;
+      if (document.querySelector('.mm-digi-guard')) return;
+      if (padsPreviewShortcutBlockedByTypingTarget(e.target)) return;
+
+      startViewportScan();
+      ensureActiveHighlight();
+      syncFocusedGridCellToActive();
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
+
     document.addEventListener('keydown', (e)=>{
       if (!digiproPanelIsVisible()) return;
 
@@ -2189,9 +2239,12 @@ cell.addEventListener('dragleave', ()=>{
       const key = e.key;
       let handled = false;
       const isTextEntry = mmIsTextEntryTarget(e.target);
+      const targetEl = (e.target && e.target.nodeType === 1) ? e.target : (e.target && e.target.parentElement ? e.target.parentElement : null);
+      const rangeInput = targetEl && targetEl.closest ? targetEl.closest('input[type="range"]') : null;
+      const allowShortcutFromRange = !!rangeInput;
 
       // Pads mode gets range playback and transposition shortcuts that mirror the 3D view controls.
-      if (KB_VIEW_MODE === 'pads' && !isTextEntry && !(e.metaKey || e.ctrlKey || e.altKey)){
+      if (KB_VIEW_MODE === 'pads' && !(e.metaKey || e.ctrlKey || e.altKey) && (!isTextEntry || allowShortcutFromRange)){
         if (e.code === 'Space' && e.shiftKey){
           startViewportScan();
           handled = true;
@@ -2212,34 +2265,16 @@ cell.addEventListener('dragleave', ()=>{
       else if (key==='ArrowUp'){ activeIdx = clamp(activeIdx-8, 0, 63); handled=true; }
       else if (key==='ArrowDown'){ activeIdx = clamp(activeIdx+8, 0, 63); handled=true; }
 
-      // Enter opens editor for the active slot
+      // Enter mirrors the grid click semantics for the active slot.
       else if (key==='Enter'){
-        maybeGuardBeforeSwitch(activeIdx, ()=>{
-          openInEditor(activeIdx);
-          try{
-            if (!(JOB && JOB.running)){
-              const idx = (activeIdx|0);
-              const w = (LIB && LIB.waves) ? LIB.waves[idx] : null;
-              const ok = !!(w && w.dataU8 && w.dataU8.length && !isSilentU8(w.dataU8));
-              const nm = (EDIT && EDIT.name) ? String(EDIT.name).toUpperCase() : ((w && w.name) ? String(w.name).toUpperCase() : 'WAVE');
-              announceIO(ok ? `Loaded slot ${idx+1} ${nm}.` : `Loaded slot ${idx+1} (empty).`);
-            }
-          }catch(_){ }
-        });
+        if (!e.repeat) applyGridSlotGesture(activeIdx, e);
         handled=true;
       }
 
       // Space previews
       else if (key===' '){
         quickPreview(activeIdx);
-        try{
-          if (!e.repeat && !(JOB && JOB.running)){
-            const idx = (activeIdx|0);
-            const w = (LIB && LIB.waves) ? LIB.waves[idx] : null;
-            const ok = !!(w && w.dataU8 && w.dataU8.length && !isSilentU8(w.dataU8));
-            announceIO(ok ? `Preview slot ${idx+1}.` : `Slot ${idx+1} empty.`, !ok);
-          }
-        }catch(_){ }
+        if (!e.repeat) announceGridPreview(activeIdx|0);
         handled=true;
       }
 
@@ -2279,36 +2314,47 @@ cell.addEventListener('dragleave', ()=>{
 
       // Cmd/Ctrl+A selects all
       else if ((e.metaKey||e.ctrlKey) && (key==='a'||key==='A')){
-        if (mmIsTextEntryTarget(e.target)) return;
+        if (isTextEntry && !allowShortcutFromRange) return;
         selectAllSlots();
         announceIO('Selected all slots.');
         handled = true;
       }
 
+      // A toggles between the classic FX grid and Table Mode.
+      else if (!e.metaKey && !e.ctrlKey && !e.altKey && e.code === 'KeyA'){
+        if (isTextEntry && !allowShortcutFromRange) return;
+        if (e.repeat) return;
+        if (typeof root.__digiproToggleSimpleMode === 'function'){
+          root.__digiproToggleSimpleMode();
+          handled = true;
+        }
+      }
+
       // Copy/Cut/Paste (bank-slot semantics)
       else if ((e.metaKey||e.ctrlKey) && (key==='c'||key==='C')){
-        if (mmIsTextEntryTarget(e.target)) return;
+        if (isTextEntry && !allowShortcutFromRange) return;
         copySlotsToClipboard();
         handled = true;
       }
       else if ((e.metaKey||e.ctrlKey) && (key==='x'||key==='X')){
-        if (mmIsTextEntryTarget(e.target)) return;
+        if (isTextEntry && !allowShortcutFromRange) return;
         cutSlotsToClipboard();
         handled = true;
       }
       else if ((e.metaKey||e.ctrlKey) && e.shiftKey && (key==='v'||key==='V')){
-        if (mmIsTextEntryTarget(e.target)) return;
+        if (isTextEntry && !allowShortcutFromRange) return;
         promptPasteSpecialMenu();
         handled = true;
       }
       else if ((e.metaKey||e.ctrlKey) && (key==='v'||key==='V')){
-        if (mmIsTextEntryTarget(e.target)) return;
+        if (isTextEntry && !allowShortcutFromRange) return;
         pasteClipboardToActive();
         handled = true;
       }
 
       if (handled){
         ensureActiveHighlight();
+        syncFocusedGridCellToActive();
         e.preventDefault();
       }
     }, { passive:false });

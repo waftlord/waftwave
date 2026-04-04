@@ -22,27 +22,69 @@
   }
 
   let audioCtx = null;
-  function ensureAudio(){
-    const ac = (root.Tone && root.Tone.getContext)
-      ? root.Tone.getContext().rawContext
-      : (audioCtx || (audioCtx = new (window.AudioContext||window.webkitAudioContext)()));
 
-    // Best-effort unlock/resume. Avoid unhandled promise rejections.
+  function ensureAudio(opts){
+    opts = opts || {};
+    const allowCreate = (opts.create !== false);
+
+    try{
+      if (root.Tone && typeof root.Tone.getContext === 'function'){
+        const toneCtx = root.Tone.getContext();
+        if (toneCtx && toneCtx.rawContext) return toneCtx.rawContext;
+        if (toneCtx) return toneCtx;
+      }
+    }catch(_){ }
+
+    if (audioCtx) return audioCtx;
+    if (!allowCreate) return null;
+
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+
+    try{
+      audioCtx = new Ctor();
+    }catch(_){
+      audioCtx = null;
+    }
+    return audioCtx;
+  }
+
+  function canUnlockAudioFromCurrentTurn(opts){
+    opts = opts || {};
+    if (opts.force) return true;
+    try{
+      const ua = root.navigator && root.navigator.userActivation;
+      if (ua && typeof ua.isActive === 'boolean') return !!ua.isActive;
+    }catch(_){ }
+    return !!opts.assumeGesture;
+  }
+
+  function requestAudioUnlock(opts){
+    opts = opts || {};
+    if (!canUnlockAudioFromCurrentTurn(opts)) return null;
+
+    const ac = ensureAudio({ create:true });
+    let resumePromise = null;
+
     try{
       if (root.Tone && typeof root.Tone.start === 'function'){
         const p = root.Tone.start();
         if (p && typeof p.catch === 'function') p.catch(()=>{});
+        if (p) resumePromise = p;
       }
     }catch(_){ }
+
     try{
       if (ac && ac.state === 'suspended' && typeof ac.resume === 'function'){
         const p = ac.resume();
         if (p && typeof p.catch === 'function') p.catch(()=>{});
+        if (p) resumePromise = p;
       }
     }catch(_){ }
 
-    return ac;
+    return resumePromise;
   }
+  try{ root.requestAudioUnlock = requestAudioUnlock; }catch(_){ }
   let _activeSrc = null, _activeGain = null;
   let _smoothPreviewCurrent = null;
   let _smoothPreviewDebounceTimer = 0;
@@ -56,6 +98,7 @@
   function _buildLoopPreviewVoice(dataU8, midi){
     if (!dataU8 || !dataU8.length || isSilentU8(dataU8)) return null;
     const ac = ensureAudio();
+    if (!ac) return null;
     midi = clamp(midi, 0, 127);
 
     const N = dataU8.length|0;
@@ -95,7 +138,11 @@
       voice.stopTimer = 0;
     }
     try{
-      const ac = voice.ac || ensureAudio();
+      const ac = voice.ac || ensureAudio({ create:false });
+      if (!ac){
+        try{ voice.src.stop(); }catch(_){ }
+        return;
+      }
       const t = ac.currentTime;
       const fadeSecs = Math.max(0, (fadeMs|0) / 1000);
       voice.gain.gain.cancelScheduledValues(t);
@@ -162,6 +209,7 @@
     opts = opts || {};
     const debounceMs = Math.max(0, parseInt(opts.debounceMs, 10) || 0);
     const sessionId = ++_smoothPreviewSessionId;
+    requestAudioUnlock({ assumeGesture:true });
     const payload = {
       dataU8,
       midi,
@@ -181,13 +229,13 @@
     }, debounceMs);
   }
 
-  function stopPreview(){
-  const ac = ensureAudio();
-  try{
-    if (_activeGain){
-      const t = ac.currentTime;
-      _activeGain.gain.cancelScheduledValues(t);
-      _activeGain.gain.setValueAtTime(_activeGain.gain.value, t);
+	  function stopPreview(){
+	  const ac = ensureAudio({ create:false });
+	  try{
+	    if (ac && _activeGain){
+	      const t = ac.currentTime;
+	      _activeGain.gain.cancelScheduledValues(t);
+	      _activeGain.gain.setValueAtTime(_activeGain.gain.value, t);
       _activeGain.gain.linearRampToValueAtTime(0, t + 0.02);   // short release
       _activeSrc && _activeSrc.stop(t + 0.03);
     } else if (_activeSrc){
@@ -198,14 +246,16 @@
   clearWavetablePreviewState();
   try{ stopSmoothPreview(); }catch(_){ }
 }
-function startPreview(dataU8, midi=60){
-    if (!dataU8 || !dataU8.length || isSilentU8(dataU8)) { stopPreview(); return; }
-    stopPreview(); return playLoop(dataU8, midi);
-  }
-  function playLoop(dataU8, midi=60, secs){
-  if (!dataU8 || !dataU8.length || isSilentU8(dataU8)) return;
-  const ac = ensureAudio();
-  midi = clamp(midi, 0, 127); // safety clamp C2..C7
+	function startPreview(dataU8, midi=60){
+	    if (!dataU8 || !dataU8.length || isSilentU8(dataU8)) { stopPreview(); return; }
+	    stopPreview(); return playLoop(dataU8, midi);
+	  }
+	  function playLoop(dataU8, midi=60, secs){
+	  if (!dataU8 || !dataU8.length || isSilentU8(dataU8)) return;
+	  requestAudioUnlock({ assumeGesture:true });
+	  const ac = ensureAudio();
+	  if (!ac) return;
+	  midi = clamp(midi, 0, 127); // safety clamp C2..C7
 
   // Build a 1‑cycle loop from 8‑bit values [0..255] -> [-1..1]
   const N = dataU8.length;
@@ -253,8 +303,9 @@ function startPreview(dataU8, midi=60){
     const state = _wtScanState;
     if (!state || !_wtScanRunning) return null;
 
-    const ac = state.ac || ensureAudio();
-    const duration = Math.max(0.001, +state.duration || 0.001);
+	    const ac = state.ac || ensureAudio({ create:false });
+	    if (!ac) return null;
+	    const duration = Math.max(0.001, +state.duration || 0.001);
     const slotSpan = Math.max(0, (state.endSlot|0) - (state.startSlot|0));
     let progress = ((ac.currentTime || 0) - (+state.startTime || 0)) / duration;
 
@@ -342,6 +393,7 @@ function startPreview(dataU8, midi=60){
 
     const loop = (opts.loop == null) ? true : !!opts.loop;
     const startSlot = clampInt(parseInt(opts.startSlot, 10) || 0, 0, 63);
+    const tailFadeMs = clampInt(parseInt(opts.tailFadeMs, 10) || 4, 0, 12);
 
     stopWavetablePreview();
 
@@ -350,9 +402,11 @@ function startPreview(dataU8, midi=60){
       .map(it => (it && it.dataU8) ? it.dataU8 : it)
       .filter(u8 => u8 && u8.length);
 
-    if (!seq.length) return;
+	    if (!seq.length) return;
 
-    const ac = ensureAudio();
+	    requestAudioUnlock({ assumeGesture:true });
+	    const ac = ensureAudio();
+	    if (!ac) return;
 
     const baseN = (seq[0].length|0) || 0;
     if (baseN <= 0) return;
@@ -465,19 +519,38 @@ function startPreview(dataU8, midi=60){
 
     // Fade in (and rely on stopPreview() for a short fade out).
     const gain = ac.createGain();
-    gain.gain.setValueAtTime(0, ac.currentTime);
-    gain.gain.linearRampToValueAtTime(0.4, ac.currentTime + 0.01);
+    const now = ac.currentTime;
+    const previewGain = _previewTargetGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(previewGain, now + 0.01);
 
     src.connect(gain).connect(ac.destination);
 
     // Track "running" state for the UI toggle.
     const token = ++_wtScanToken;
     const scanDuration = (buf.duration > 0 && rate > 0) ? (buf.duration / rate) : 0;
+    if (!loop && scanDuration > 0){
+      // Preview-only tail release: keep it to just a few ms and never longer than the
+      // final slot, so the scan ends cleanly without softening the body of the preview.
+      const slotDuration = scanDuration / Math.max(1, frames.length|0);
+      const tailFadeSec = Math.max(
+        0.0015,
+        Math.min(
+          tailFadeMs / 1000,
+          Math.max(0.0015, slotDuration * 0.98),
+          Math.max(0.0015, scanDuration * 0.5)
+        )
+      );
+      const endTime = now + scanDuration;
+      const fadeStart = Math.max(now + 0.01, endTime - tailFadeSec);
+      gain.gain.setValueAtTime(previewGain, fadeStart);
+      gain.gain.linearRampToValueAtTime(0, endTime);
+    }
     _wtScanRunning = true;
     _wtScanState = {
       ac,
       loop,
-      startTime: ac.currentTime,
+      startTime: now,
       duration: scanDuration,
       slotCount: frames.length|0,
       startSlot,

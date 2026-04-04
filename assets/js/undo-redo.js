@@ -170,10 +170,22 @@
   let LAST_ACTION_DOMAIN = 'editor'; // 'editor' | 'bank'
   let LAST_UNDO_DOMAIN   = 'editor'; // last domain that actually undid/redid
 
+  function truncateEditorRedoTail(){
+    if (UNDO.index < UNDO.stack.length - 1){
+      UNDO.stack = UNDO.stack.slice(0, UNDO.index + 1);
+    }
+  }
+
+  function truncateBankRedoTail(){
+    if (BANK.index < BANK.stack.length - 1){
+      BANK.stack = BANK.stack.slice(0, BANK.index + 1);
+    }
+  }
+
   function initUndo(){
     UNDO.stack = [];
     UNDO.index = -1;
-    snapshot('baseline', { force:true });
+    snapshot('baseline', { force:true, preserveBankRedo:true });
   }
 
   function snapshot(label, opts){
@@ -196,9 +208,9 @@
     }
 
     // Truncate redo tail, then push.
-    if (UNDO.index < UNDO.stack.length - 1){
-      UNDO.stack = UNDO.stack.slice(0, UNDO.index + 1);
-    }
+    truncateEditorRedoTail();
+    // A new editor mutation supersedes any previously-undone bank action.
+    if (!opts.preserveBankRedo) truncateBankRedoTail();
 
     UNDO.stack.push({
       label: String(label || ''),
@@ -463,6 +475,7 @@
         label: String(entry.label || ''),
         before: deepCloneAny(entry.before),
         after: deepCloneAny(entry.after),
+        preserveSimpleModeSources: !!entry.preserveSimpleModeSources,
         ts: Date.now()
       };
     } else if (entry.touched){
@@ -471,6 +484,7 @@
         label: String(entry.label || ''),
         before: deepCloneAny(entry),
         after: deepCloneAny(entry),
+        preserveSimpleModeSources: !!entry.preserveSimpleModeSources,
         ts: Date.now()
       };
     } else {
@@ -478,9 +492,9 @@
     }
 
     // Truncate redo tail.
-    if (BANK.index < BANK.stack.length - 1){
-      BANK.stack = BANK.stack.slice(0, BANK.index + 1);
-    }
+    truncateBankRedoTail();
+    // A new bank mutation supersedes any previously-undone editor action.
+    truncateEditorRedoTail();
 
     BANK.stack.push(action);
 
@@ -499,7 +513,13 @@
       ...((action.after && Array.isArray(action.after.touched)) ? action.after.touched : [])
     ])).map(n => n|0).filter(n => n >= 0 && n < 64);
 
-    notifyChange({ domain:'bank', op:'push', label: action.label, touched });
+    notifyChange({
+      domain:'bank',
+      op:'push',
+      label: action.label,
+      touched,
+      preserveSimpleModeSources: !!action.preserveSimpleModeSources
+    });
   }
 
   function bankUndo(){
@@ -552,7 +572,7 @@
   function resetUndoToCurrent(keepDomain){
     const prevDomain = LAST_ACTION_DOMAIN;
     initUndo();
-    snapshot('baseline', { force:true });
+    snapshot('baseline', { force:true, preserveBankRedo:true });
     if (keepDomain) LAST_ACTION_DOMAIN = prevDomain;
   }
 

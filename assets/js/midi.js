@@ -23,6 +23,9 @@
   window.currentTurboFactor = Number(window.currentTurboFactor) || 1.0;
   window.turboActive = !!(window.currentTurboFactor > 1.0001);
   window.turboFactorSource = window.turboFactorSource || 'not detected';
+  window.turboCapability = window.turboCapability || 'unknown';
+  window.turboCapabilityDetail = window.turboCapabilityDetail || 'select MIDI In/Out first';
+  window.__turboSyncToken = Number(window.__turboSyncToken) || 0;
 
   function _clamp01(n){ n = Number(n); return isFinite(n) ? Math.max(0, Math.min(1, n)) : 0; }
   function _clampInt(n, lo, hi){
@@ -30,6 +33,38 @@
     if (!isFinite(n)) n = lo;
     n = Math.round(n);
     return Math.max(lo, Math.min(hi, n));
+  }
+
+  function setTurboCapability(mode, detail){
+    const cap = (mode === 'tm1' || mode === 'blocked') ? mode : 'unknown';
+    let msg = String(detail || '');
+    if (!msg){
+      if (cap === 'tm1') msg = 'TM-1 detected';
+      else if (cap === 'blocked') msg = 'TM-1 required';
+      else msg = 'select MIDI In/Out first';
+    }
+    window.turboCapability = cap;
+    window.turboCapabilityDetail = msg;
+    try{ if (window.updateTurboUI) window.updateTurboUI(); }catch(_){}
+  }
+
+  window.isTurboAvailable = function(){
+    return window.turboCapability === 'tm1';
+  };
+
+  function blockTurboWithoutTM1(speedVal, announce){
+    stopTurboKeepAlive();
+    setTurboCapability('blocked', 'TM-1 required');
+    window.setTurboFactor(1.0, 'TM-1 required');
+    if (announce && window.announceIO){
+      window.announceIO('Turbo requires an Elektron TM-1. Non-TM-1 MIDI interfaces are limited to x1.00.');
+    }
+    return {
+      ok: false,
+      factor: 1.0,
+      speedVal: _clampInt(speedVal == null ? 1 : speedVal, 1, 8),
+      error: 'TM-1 required'
+    };
   }
 
   // Remember the user's preferred Turbo speed (speed value 1..8).
@@ -570,6 +605,7 @@
     if (prod === 0x04 && sub === 0x00 && cmd === 0x02 && u8.length >= 9){
       const speedVal = u8[7] & 0x7F;
       const f = speedValueToFactor(speedVal);
+      setTurboCapability('tm1', 'TM-1 detected');
       window.setTurboFactor(f, 'TM‑1 detected');
       if (f > 1.0001) startTurboKeepAlive(); else stopTurboKeepAlive();
       return true;
@@ -640,6 +676,23 @@
         finish(null);
       }
     });
+  }
+
+  async function probeTM1Speed(opts){
+    const signal = opts && opts.signal;
+    const gapMs = Math.max(0, Number(opts && opts.gapMs) || 35);
+    const timeouts = Array.isArray(opts && opts.timeouts) && (opts && opts.timeouts).length
+      ? (opts.timeouts).map((v)=>Math.max(60, Number(v) || 0)).filter((v)=>v > 0)
+      : [250, 420];
+
+    for (let i = 0; i < timeouts.length; i += 1){
+      const res = await queryTM1SpeedOnce(timeouts[i], signal).catch(()=>null);
+      if (res && typeof res.idx === 'number') return res;
+      if (i < timeouts.length - 1){
+        try{ await sleepAbortable(gapMs, signal); }catch(_){ return null; }
+      }
+    }
+    return null;
   }
 
   // Set the TM‑1 Turbo speed (C6-style vendor set).
@@ -827,9 +880,15 @@
       window._turboToggleBusy = true;
 
       try{
+        if (!window.selectedMidiOut || !window.selectedMidiIn){
+          setTurboCapability('unknown', 'select MIDI In/Out first');
+          throw new Error('Select MIDI In and MIDI Out first.');
+        }
+
         // Probe TM‑1 once up-front so we know whether we can/should require a confirmation.
-        const tmProbe = await queryTM1SpeedOnce(250).catch(()=>null);
+        const tmProbe = await probeTM1Speed({ timeouts:[250, 420] }).catch(()=>null);
         const hasTM1 = !!(tmProbe && typeof tmProbe.idx === 'number');
+        if (hasTM1) setTurboCapability('tm1', 'TM-1 detected');
 
         // Toggle off: ask TM‑1 to drop back to OFF (idx=1), then stop keepalive.
         if (window.currentTurboFactor > 1.0001){
@@ -841,7 +900,7 @@
           stopTurboKeepAlive();
 
           // If a TM‑1 is present and still running Turbo, don't pretend we're at x1.00.
-          const tm = hasTM1 ? await queryTM1SpeedOnce(420).catch(()=>null) : null;
+          const tm = hasTM1 ? await probeTM1Speed({ timeouts:[320, 500] }).catch(()=>null) : null;
           if (tm && tm.factor && tm.factor > 1.0001){
             window.setTurboFactor(tm.factor, 'TM‑1 detected');
             startTurboKeepAlive();
@@ -854,6 +913,10 @@
         }
 
         // Toggle on:
+        if (!hasTM1){
+          return blockTurboWithoutTM1(1, true);
+        }
+
         // If TM‑1 is already in Turbo, just follow it.
         if (tmProbe && tmProbe.factor && tmProbe.factor > 1.0001){
           window.setTurboFactor(tmProbe.factor, 'TM‑1 detected');
@@ -876,20 +939,12 @@
           }
 
           // Confirm actual on-wire speed from TM‑1 if present (prevents “turboActive” lying).
-          const tm2 = await queryTM1SpeedOnce(650).catch(()=>null);
+          const tm2 = await probeTM1Speed({ timeouts:[650, 900] }).catch(()=>null);
           if (tm2 && tm2.factor && tm2.factor > 1.0001){
             window.setTurboFactor(tm2.factor, 'TM‑1 detected');
             startTurboKeepAlive();
             if (window.announceIO) window.announceIO(`Turbo enabled — TM‑1 reports x${tm2.factor.toFixed(2)}.`);
             return { ok:true, factor:tm2.factor, speedVal: res.speedVal, source:'negotiated+tm1' };
-          }
-
-          // If we can't confirm via TM‑1, only enable best-effort for non‑TM‑1 interfaces.
-          if (!hasTM1){
-            window.setTurboFactor(res.factor, 'TurboMIDI enabled');
-            startTurboKeepAlive();
-            if (window.announceIO) window.announceIO(`Turbo enabled — using x${res.factor.toFixed(2)}.`);
-            return res;
           }
 
           // TM‑1 present but we couldn't confirm it switched — stay safe at x1.00.
@@ -940,12 +995,14 @@
 
     try{
       if (!window.selectedMidiOut || !window.selectedMidiIn){
+        setTurboCapability('unknown', 'select MIDI In/Out first');
         throw new Error('Select MIDI In and MIDI Out first.');
       }
 
       // Probe TM‑1 (if present we can set speed directly like C6 does).
-      const tmProbe = await queryTM1SpeedOnce(300).catch(()=>null);
+      const tmProbe = await probeTM1Speed({ timeouts:[300, 500] }).catch(()=>null);
       const hasTM1 = !!(tmProbe && typeof tmProbe.idx === 'number');
+      if (hasTM1) setTurboCapability('tm1', 'TM-1 detected');
 
       // Desired = 1 => OFF
       if (desired === 1){
@@ -953,11 +1010,15 @@
           await setTM1SpeedOnce(1, 650).catch(()=>null);
         }
 
-        window.setTurboFactor(1.0, 'not detected');
+        window.setTurboFactor(1.0, hasTM1 ? 'TM-1 ready' : 'TM-1 required');
         stopTurboKeepAlive();
 
+        if (!hasTM1){
+          setTurboCapability('blocked', 'TM-1 required');
+        }
+
         // If TM‑1 still reports Turbo, follow it (don’t lie in UI).
-        const tm = hasTM1 ? await queryTM1SpeedOnce(420).catch(()=>null) : null;
+        const tm = hasTM1 ? await probeTM1Speed({ timeouts:[320, 500] }).catch(()=>null) : null;
         if (tm && tm.factor && tm.factor > 1.0001){
           window.setTurboFactor(tm.factor, 'TM‑1 detected');
           startTurboKeepAlive();
@@ -970,10 +1031,14 @@
       }
 
       // Desired > 1:
+      if (!hasTM1){
+        return blockTurboWithoutTM1(desired, true);
+      }
+
       // TM‑1 present: set speed directly (C6-style vendor set) and trust the TM‑1 reply.
       if (hasTM1){
         const res = await setTM1SpeedOnce(desired, 900).catch(()=>null);
-        const tm = await queryTM1SpeedOnce(700).catch(()=>res);
+        const tm = await probeTM1Speed({ timeouts:[700, 950] }).catch(()=>res);
 
         if (tm && tm.factor){
           window.setTurboFactor(tm.factor, 'TM‑1 detected');
@@ -989,22 +1054,7 @@
         return { ok:false, factor:prevFactor, speedVal:desired, error:'No TM‑1 reply' };
       }
 
-      // No TM‑1: negotiate TurboMIDI up to the requested speed.
-      if (window.announceIO) window.announceIO('Trying to negotiate Turbo speed…');
-      const res = await negotiateTurboOnce({ timeoutMs: 900, maxSpeedVal: desired });
-
-      if (res && res.ok){
-        window.setTurboFactor(res.factor, 'TurboMIDI enabled');
-        startTurboKeepAlive();
-        if (window.announceIO) window.announceIO(`Turbo enabled — using x${res.factor.toFixed(2)}.`);
-        return res;
-      }
-
-      // Negotiation failed — keep previous setting (more robust than falling back to x1).
-      window.setTurboFactor(prevFactor, prevSource);
-      if (prevFactor > 1.0001) startTurboKeepAlive(); else stopTurboKeepAlive();
-      if (window.announceIO) window.announceIO('Turbo speed change failed — leaving current setting unchanged.');
-      return res || { ok:false, factor:prevFactor, speedVal:desired, error:'Turbo not detected' };
+      return blockTurboWithoutTM1(desired, true);
     }catch(err){
       // Restore previous setting on errors.
       window.setTurboFactor(prevFactor, prevSource);
@@ -1019,22 +1069,40 @@
 
   // Called when ports change.
   window.maybeSyncTurbo = function(){
-    // Called when ports change. We reset to x1.00 then (optionally) query a TM‑1 to learn the
-    // actual current Turbo speed so our pacing stays correct.
+    // Called when ports change. We reset to x1.00 and only enable Turbo if a TM-1
+    // positively answers on the currently selected MIDI route.
+    const syncToken = (++window.__turboSyncToken);
     try{
       stopTurboKeepAlive();
-      window.setTurboFactor(1.0, 'not detected');
+      window.setTurboFactor(1.0, 'TM-1 required');
+      if (!window.selectedMidiIn || !window.selectedMidiOut){
+        setTurboCapability('unknown', 'select MIDI In/Out first');
+        return;
+      }
+      setTurboCapability('unknown', 'checking for TM-1...');
     }catch(_){}
 
     // Fire-and-forget (avoid unhandled rejections).
     (async ()=>{
       try{
-        const tm = await queryTM1SpeedOnce(350).catch(()=>null);
-        if (tm && tm.factor && tm.factor > 1.0001){
-          window.setTurboFactor(tm.factor, 'TM‑1 detected');
-          startTurboKeepAlive();
+        const tm = await probeTM1Speed({ timeouts:[350, 550] }).catch(()=>null);
+        if (syncToken !== window.__turboSyncToken) return;
+        if (tm && typeof tm.idx === 'number'){
+          setTurboCapability('tm1', 'TM-1 detected');
+          if (tm.factor && tm.factor > 1.0001){
+            window.setTurboFactor(tm.factor, 'TM‑1 detected');
+            startTurboKeepAlive();
+          } else {
+            window.setTurboFactor(1.0, 'TM-1 ready');
+            stopTurboKeepAlive();
+          }
+          return;
         }
-      }catch(_){}
+        blockTurboWithoutTM1(1, false);
+      }catch(_){
+        if (syncToken !== window.__turboSyncToken) return;
+        blockTurboWithoutTM1(1, false);
+      }
     })();
   };
 
@@ -1897,6 +1965,9 @@ window.requestDumpAsync = requestDumpAsync;
   // -----------------------------
   window.updateTurboUI = function(){
     const f = Number(window.currentTurboFactor) || 1.0;
+    const cap = window.turboCapability || 'unknown';
+    const capDetail = String(window.turboCapabilityDetail || (cap === 'tm1' ? 'TM-1 detected' : (cap === 'blocked' ? 'TM-1 required' : 'select MIDI In/Out first')));
+    const hasPorts = !!(window.selectedMidiIn && window.selectedMidiOut);
     const btn = document.getElementById('turboButton');
     const pill = document.getElementById('turboSpeedLabel');
     const topPill = document.getElementById('turboTopPill');
@@ -1913,16 +1984,29 @@ window.requestDumpAsync = requestDumpAsync;
       const prefF = speedValueToFactor(prefV);
       const src = window.turboFactorSource || ((f > 1.0001) ? 'detected' : 'not detected');
       topPill.textContent = `Turbo: ${pretty}`;
-      topPill.title = (f > 1.0001)
-        ? `Turbo active (${src}). Preferred: x${prefF.toFixed(2)}.`
-        : `Turbo off. Preferred enable target: x${prefF.toFixed(2)}.`;
+      if (f > 1.0001){
+        topPill.title = `Turbo active (${src}). Preferred: x${prefF.toFixed(2)}.`;
+      } else if (cap === 'tm1'){
+        topPill.title = `TM-1 detected. Turbo is available; current speed is x1.00. Preferred enable target: x${prefF.toFixed(2)}.`;
+      } else if (cap === 'blocked'){
+        topPill.title = 'Turbo is disabled. Non-TM-1 MIDI interfaces are limited to x1.00.';
+      } else {
+        topPill.title = `Turbo unavailable: ${capDetail}.`;
+      }
     }
     if (btn){
       btn.classList.toggle('active', f > 1.0001);
       btn.setAttribute('aria-pressed', (f > 1.0001) ? 'true' : 'false');
 
       // Match the MMDT semantics in the modal (clear on/off action)
-      btn.textContent = (f > 1.0001) ? 'Disable' : 'Enable';
+      btn.textContent = (f > 1.0001) ? 'Disable' : ((cap === 'tm1') ? 'Enable' : 'TM-1 only');
+      if (cap === 'tm1'){
+        btn.title = 'Enable or disable Turbo.';
+      } else if (hasPorts){
+        btn.title = 'Turbo requires an Elektron TM-1. Click to re-check the selected MIDI route.';
+      } else {
+        btn.title = 'Select MIDI In and MIDI Out first.';
+      }
     }
 
     // Keep the speed slider in sync.
@@ -1931,7 +2015,9 @@ window.requestDumpAsync = requestDumpAsync;
     // (Don’t clobber while the user is dragging.)
     if (slider){
       let bestV = 1;
-      if (f <= 1.0001){
+      if (cap !== 'tm1'){
+        bestV = 1;
+      } else if (f <= 1.0001){
         // Prefer showing the last-used turbo speed (so Enable will match the visible value).
         bestV = _clampInt(window.turboPreferredSpeedVal || 8, 1, 8);
         if (bestV <= 1) bestV = 8;
@@ -1946,14 +2032,23 @@ window.requestDumpAsync = requestDumpAsync;
       if (document.activeElement !== slider){
         slider.value = String(bestV);
       }
+      slider.title = (cap === 'tm1')
+        ? 'Turbo speed'
+        : (hasPorts ? 'Turbo requires an Elektron TM-1 on this build.' : 'Select MIDI In and MIDI Out first.');
     }
 
     if (line){
-      const src = window.turboFactorSource || ((f > 1.0001) ? 'detected' : 'not detected');
-      line.textContent = (f > 1.0001)
-        ? `Turbo: ${pretty} (${src})`
-        : `Turbo: ${pretty} (not detected)`;
+      if (f > 1.0001){
+        const src = window.turboFactorSource || 'detected';
+        line.textContent = `Turbo: ${pretty} (${src})`;
+      } else if (cap === 'tm1'){
+        line.textContent = 'Turbo: x1.00 (TM-1 ready)';
+      } else {
+        line.textContent = `Turbo: x1.00 (${capDetail})`;
+      }
     }
+
+    try{ if (window.syncTurboControls) window.syncTurboControls(); }catch(_){}
   };
 
   window.updateSysexPreview = function(){

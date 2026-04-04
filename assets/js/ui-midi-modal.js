@@ -5,6 +5,8 @@
 (function(){
   'use strict';
 
+  window.__dpTurboUiBusy = !!window.__dpTurboUiBusy;
+
 
   // -----------------------------
   // MIDI modal wiring (simplified)
@@ -127,10 +129,20 @@
     }
   })();
 
+  function syncTurboControls(){
+    const turboAvailable = (typeof window.isTurboAvailable === 'function')
+      ? !!window.isTurboAvailable()
+      : true;
+    const hasPorts = !!(window.selectedMidiIn && window.selectedMidiOut);
+    const turboBtnDisabled = !!window.__dpTurboUiBusy || midiUiLocked || !hasPorts;
+    const turboSliderDisabled = !!window.__dpTurboUiBusy || midiUiLocked || !hasPorts || !turboAvailable;
+    if (turboBtn) turboBtn.disabled = turboBtnDisabled;
+    if (turboSlider) turboSlider.disabled = turboSliderDisabled;
+  }
+
   function setTurboUiBusy(b){
-    const dis = !!b || midiUiLocked;
-    if (turboBtn) turboBtn.disabled = dis;
-    if (turboSlider) turboSlider.disabled = dis;
+    window.__dpTurboUiBusy = !!b;
+    syncTurboControls();
   }
 
   function toast(msg, isError=false){
@@ -161,8 +173,7 @@
 
     // Turbo and gap controls are also configuration.
     // (Busy state is handled separately, but lock must always win.)
-    if (turboBtn) turboBtn.disabled = dis;
-    if (turboSlider) turboSlider.disabled = dis;
+    syncTurboControls();
     if (gapEnable) gapEnable.disabled = dis;
     if (gapSlider) gapSlider.disabled = dis;
 
@@ -190,6 +201,7 @@
     try{ refreshMidiUiLockFromJob && refreshMidiUiLockFromJob(); }catch(_){ }
     try{ window.updateSysexPreview && window.updateSysexPreview(); }catch(_){}
     try{ window.updateTurboUI && window.updateTurboUI(); }catch(_){}
+    try{ syncTurboControls(); }catch(_){}
     try{ syncInterSlotUi && syncInterSlotUi(); }catch(_){}
   }
 
@@ -327,6 +339,8 @@
   }
 
   // Initial sync (in case the modal is never opened).
+  window.syncTurboControls = syncTurboControls;
+  try{ syncTurboControls(); }catch(_){}
   try{ syncInterSlotUi(); }catch(_){}
 
   // Capture-all is fed from the central complete-SysEx bus now,

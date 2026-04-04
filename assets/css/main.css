@@ -756,6 +756,7 @@ body.mm-app .mm-allow-select{
   background: linear-gradient(180deg, rgba(76, 201, 240, 0.22), rgba(76, 201, 240, 0.08));
   color: #eafaff;
 }
+.mm-simple-interaction,
 .mm-simple-morph {
   display: inline-flex;
   align-items: center;
@@ -763,12 +764,14 @@ body.mm-app .mm-allow-select{
   min-width: 0;
   flex: 1 1 auto;
 }
+.mm-simple-interaction-label,
 .mm-simple-morph-label {
   font-size: 11px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
+.mm-simple-interaction-select,
 .mm-simple-morph-select {
   flex: 1 1 auto;
   min-width: 160px;
@@ -808,11 +811,56 @@ body.mm-app .mm-allow-select{
   color: rgba(169, 180, 192, 0.7);
 }
 .mm-simple-slider-label {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0 0 1px;
+  border: none;
+  border-radius: 6px;
+  background: none;
   font-size: 10px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   text-align: center;
+  text-decoration: underline;
+  text-decoration-color: rgba(169, 180, 192, 0.12);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: color 120ms ease, text-decoration-color 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+}
+.mm-simple-slider-label::after {
+  content: attr(data-mode-short);
+  width: 1ch;
+  font-size: 9px;
+  line-height: 1;
+  color: rgba(169, 180, 192, 0.38);
+}
+.mm-simple-slider-label.is-excite {
+  color: rgba(190, 245, 255, 0.92);
+  text-decoration-color: rgba(76, 201, 240, 0.46);
+}
+.mm-simple-slider-label.is-excite::after {
+  color: rgba(76, 201, 240, 0.9);
+}
+.mm-simple-slider-label:hover,
+.mm-simple-slider-label:focus-visible {
+  background: none;
+  border: none;
+  color: var(--text);
+  text-decoration-color: rgba(76, 201, 240, 0.34);
+  box-shadow: 0 0 0 2px rgba(76, 201, 240, 0.16);
+  outline: none;
+}
+.mm-simple-slider-label:active {
+  transform: none;
+}
+.mm-simple-slider.is-disabled .mm-simple-slider-label.is-excite {
+  color: rgba(190, 245, 255, 0.72);
 }
 .mm-simple-slider-track {
   display: flex;
@@ -830,8 +878,6 @@ body.mm-app .mm-allow-select{
   background: transparent;
   writing-mode: vertical-lr;
   direction: rtl;
-  appearance: slider-vertical;
-  -webkit-appearance: slider-vertical;
 }
 .mm-simple-range:disabled {
   opacity: 0.4;

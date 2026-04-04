@@ -115,6 +115,10 @@ const DP_SIMPLE_MODE_CONTROLS = [
   { id:'tone',  label:'Tone',  min:-100, max:100, step:1, neutral:0 },
   { id:'smear', label:'Smear', min:0,    max:100, step:1, neutral:0 },
 ];
+const DP_SIMPLE_CONTROL_MODE_INFO = {
+  lock: { id:'lock', label:'Lock', short:'L' },
+  excite: { id:'excite', label:'Excite', short:'E' }
+};
 const DP_SIMPLE_MORPH_OPTIONS = [
   ['linear', 'Linear'],
   ['spectral', 'Spectral'],
@@ -125,6 +129,10 @@ const DP_SIMPLE_MORPH_OPTIONS = [
   ['pingPong', 'Ping-Pong'],
   ['centerOut', 'Center-Out']
 ];
+const DP_SIMPLE_TABLE_INTERACTION_INFO = {
+  classic: { id:'classic', label:'Preserve Sources' },
+  anchor: { id:'anchor', label:'Smooth Flow' }
+};
 const DP_SIMPLE_MORPH_INFO = {
   linear: { blend:'direct', distribution:'forward' },
   spectral: { blend:'spectral', distribution:'forward' },
@@ -172,6 +180,59 @@ function dpSimpleMorphInfo(mode){
   return DP_SIMPLE_MORPH_INFO.linear;
 }
 
+function dpSimpleNormTableInteraction(raw){
+  return (String(raw || '') === 'anchor') ? 'anchor' : 'classic';
+}
+
+function dpSimpleTableInteractionInfo(raw){
+  const id = dpSimpleNormTableInteraction(raw);
+  return DP_SIMPLE_TABLE_INTERACTION_INFO[id] || DP_SIMPLE_TABLE_INTERACTION_INFO.classic;
+}
+
+function dpSimpleDefaultControlModes(){
+  const out = {};
+  for (const ctl of DP_SIMPLE_MODE_CONTROLS) out[ctl.id] = 'lock';
+  return out;
+}
+
+function dpSimpleNormControlMode(raw){
+  return (String(raw || '') === 'excite') ? 'excite' : 'lock';
+}
+
+function dpSimpleControlModeInfo(mode){
+  return DP_SIMPLE_CONTROL_MODE_INFO[dpSimpleNormControlMode(mode)] || DP_SIMPLE_CONTROL_MODE_INFO.lock;
+}
+
+function dpSimpleGetControlMode(state, id){
+  const st = dpNormSimpleModeState(state);
+  if (!id || !Object.prototype.hasOwnProperty.call(st.controlModes || {}, id)) return 'lock';
+  return dpSimpleNormControlMode(st.controlModes[id]);
+}
+
+function dpSimpleToggleControlMode(state, id){
+  const st = dpNormSimpleModeState(state);
+  if (!id || !Object.prototype.hasOwnProperty.call(st.controlModes || {}, id)) return st;
+  st.controlModes = Object.assign({}, st.controlModes);
+  st.controlModes[id] = (st.controlModes[id] === 'excite') ? 'lock' : 'excite';
+  return st;
+}
+
+function dpSimpleControlModeTitle(label, mode){
+  const current = dpSimpleControlModeInfo(mode).label;
+  return `Click to toggle ${label} mode: Lock / Excite. Current: ${current}.`;
+}
+
+function dpSimpleModeStatesMatch(a, b){
+  const aa = dpNormSimpleModeState(a);
+  const bb = dpNormSimpleModeState(b);
+  if (aa.mode !== bb.mode || aa.morph !== bb.morph || aa.tableInteraction !== bb.tableInteraction) return false;
+  for (const ctl of DP_SIMPLE_MODE_CONTROLS){
+    if ((aa[ctl.id]|0) !== (bb[ctl.id]|0)) return false;
+    if (dpSimpleGetControlMode(aa, ctl.id) !== dpSimpleGetControlMode(bb, ctl.id)) return false;
+  }
+  return true;
+}
+
 function dpSimpleControlDisabledReason(id, morph){
   const cfg = DP_SIMPLE_CONTROL_MORPH_RULES[id];
   if (!cfg || !cfg.disabled) return '';
@@ -191,7 +252,9 @@ function dpSimplePostBlendWeight(id, morph, amount){
 function dpSimpleDefaultState(){
   return {
     mode: 'classic',
+    tableInteraction: 'anchor',
     morph: 'linear',
+    controlModes: dpSimpleDefaultControlModes(),
     fold: 0,
     skew: 0,
     sat: 0,
@@ -207,10 +270,23 @@ function dpNormSimpleModeState(raw){
   const src = (raw && typeof raw === 'object') ? raw : {};
   const out = dpSimpleDefaultState();
   out.mode = (src.mode === 'simple') ? 'simple' : 'classic';
+  const rawTableInteraction = (src.tableInteraction != null)
+    ? src.tableInteraction
+    : src.tableMode;
+  const hasStoredPayload = Object.keys(src).length > 0;
+  out.tableInteraction = (rawTableInteraction == null)
+    ? (hasStoredPayload ? 'classic' : out.tableInteraction)
+    : dpSimpleNormTableInteraction(rawTableInteraction);
   out.morph = Object.prototype.hasOwnProperty.call(DP_SIMPLE_MORPH_INFO, src.morph) ? src.morph : 'linear';
+  const srcControlModes = (src.controlModes && typeof src.controlModes === 'object') ? src.controlModes : null;
   for (const ctl of DP_SIMPLE_MODE_CONTROLS){
     const v = parseInt(src[ctl.id], 10);
     out[ctl.id] = Math.max(ctl.min, Math.min(ctl.max, isFinite(v) ? v : ctl.neutral));
+    out.controlModes[ctl.id] = dpSimpleNormControlMode(
+      srcControlModes && Object.prototype.hasOwnProperty.call(srcControlModes, ctl.id)
+        ? srcControlModes[ctl.id]
+        : src[`${ctl.id}Mode`]
+    );
   }
   return out;
 }
@@ -256,10 +332,123 @@ function dpSimpleValueText(id, value){
   return String(v);
 }
 
+function dpSimpleSlotsSignature(slots){
+  return (Array.isArray(slots) ? slots.slice() : [])
+    .map(n=>n|0)
+    .filter(n=>n>=0 && n<64)
+    .sort((a,b)=>a-b)
+    .join(',');
+}
+
+function dpResolveReactiveSelectionPlan(selectedSlots, liveBySlot){
+  const selected = (Array.isArray(selectedSlots) ? selectedSlots.slice() : [])
+    .map(n=>n|0)
+    .filter((slot, idx, arr)=>slot>=0 && slot<64 && arr.indexOf(slot) === idx)
+    .sort((a,b)=>a-b);
+  const live = (liveBySlot && typeof liveBySlot === 'object') ? liveBySlot : {};
+  const totalFilledSlots = Object.keys(live)
+    .map(n=>n|0)
+    .filter((slot, idx, arr)=>{
+      if (!(slot>=0 && slot<64) || arr.indexOf(slot) !== idx) return false;
+      const rec = live[slot];
+      return !!(rec && rec.dataU8 && rec.dataU8.length);
+    })
+    .sort((a,b)=>a-b);
+  const selectedFilledSlots = selected.filter((slot)=>{
+    const rec = live[slot];
+    return !!(rec && rec.dataU8 && rec.dataU8.length);
+  });
+  const middleSlots = (selectedFilledSlots.length > 2)
+    ? selectedFilledSlots.slice(1, -1)
+    : [];
+  const denseSelection = (totalFilledSlots.length > 0)
+    && (selectedFilledSlots.length > 3)
+    && (selectedFilledSlots.length >= Math.min(
+      totalFilledSlots.length,
+      Math.max(6, Math.ceil(totalFilledSlots.length * 0.5))
+    ));
+  if (selectedFilledSlots.length < 2){
+    return {
+      selectedSlots: selected,
+      selectedFilledSlots,
+      totalFilledSlots,
+      denseSelection,
+      anchorSlots: [],
+      guideSlots: []
+    };
+  }
+  const useGuideSlots = middleSlots.length > 0 && (!denseSelection || middleSlots.length <= 3);
+  return {
+    selectedSlots: selected,
+    selectedFilledSlots,
+    totalFilledSlots,
+    denseSelection,
+    anchorSlots: [selectedFilledSlots[0], selectedFilledSlots[selectedFilledSlots.length - 1]],
+    guideSlots: useGuideSlots ? middleSlots : []
+  };
+}
+
+function dpResolveReactiveTargetPlan(selectedSlots, liveBySlot){
+  const live = (liveBySlot && typeof liveBySlot === 'object') ? liveBySlot : {};
+  const totalFilledSlots = Object.keys(live)
+    .map(n=>n|0)
+    .filter((slot, idx, arr)=>{
+      if (!(slot>=0 && slot<64) || arr.indexOf(slot) !== idx) return false;
+      const rec = live[slot];
+      return !!(rec && rec.dataU8 && rec.dataU8.length);
+    })
+    .sort((a,b)=>a-b);
+  const selectionPlan = dpResolveReactiveSelectionPlan(selectedSlots, live);
+  const anchorSlots = selectionPlan.anchorSlots.slice();
+  const selectionCoversWholeTable = (selectionPlan.selectedFilledSlots || []).length >= 2
+    && totalFilledSlots.length >= 2
+    && (selectionPlan.selectedFilledSlots || []).length === totalFilledSlots.length;
+  if (anchorSlots.length >= 2 && !selectionCoversWholeTable){
+    return {
+      scope: 'anchors',
+      targets: totalFilledSlots,
+      liveBySlot: live,
+      anchorSlots,
+      guideSlots: (selectionPlan.guideSlots || []).slice(),
+      selectionSignature: dpSimpleSlotsSignature(selectedSlots),
+      anchorSignature: dpSimpleSlotsSignature(anchorSlots),
+      implicitAnchors: false,
+      denseSelection: !!selectionPlan.denseSelection
+    };
+  }
+
+  const selectedTargets = (selectionPlan.selectedFilledSlots || []).slice();
+  const useSelectedScope = selectedTargets.length > 0;
+  return {
+    scope: useSelectedScope ? 'selected' : 'wavetable',
+    targets: useSelectedScope ? selectedTargets : totalFilledSlots,
+    liveBySlot: live,
+    anchorSlots: [],
+    guideSlots: [],
+    selectionSignature: dpSimpleSlotsSignature(selectedSlots),
+    anchorSignature: '',
+    implicitAnchors: false,
+    denseSelection: !!selectionPlan.denseSelection
+  };
+}
+
 function dpSimpleIsNeutral(state){
   const st = dpNormSimpleModeState(state);
   if (st.morph !== 'linear') return false;
-  return DP_SIMPLE_MODE_CONTROLS.every((ctl)=> (st[ctl.id]|0) === (ctl.neutral|0));
+  return DP_SIMPLE_MODE_CONTROLS.every((ctl)=>
+    (st[ctl.id]|0) === (ctl.neutral|0)
+    && dpSimpleGetControlMode(st, ctl.id) === 'lock'
+  );
+}
+
+function dpSimpleNeutralizedState(state){
+  const st = dpNormSimpleModeState(state);
+  const out = Object.assign({}, st);
+  out.controlModes = Object.assign({}, st.controlModes);
+  for (const ctl of DP_SIMPLE_MODE_CONTROLS){
+    out[ctl.id] = ctl.neutral|0;
+  }
+  return out;
 }
 
 function dpSimpleWaveMatches(a, b){
@@ -273,6 +462,109 @@ function dpSimpleWaveMatches(a, b){
   return true;
 }
 
+function dpSimpleBlendExciteU8(baseU8, excitedU8, mix){
+  const amount = Math.max(0, Math.min(1, Number(mix) || 0));
+  const excited = (excitedU8 instanceof Uint8Array) ? excitedU8 : new Uint8Array(excitedU8 || []);
+  if (!excited.length) return dpSimpleCopyWaveU8(baseU8);
+  if (typeof dpBlendU8 === 'function') return dpBlendU8(baseU8, excited, amount);
+  return dpSimpleCopyWaveU8(excited);
+}
+
+function dpSimpleAddDeterministicNoiseU8(srcU8, amount){
+  const src = (srcU8 instanceof Uint8Array) ? srcU8 : new Uint8Array(srcU8 || []);
+  const mix = Math.max(0, Math.min(1, Number(amount) || 0));
+  const N = src.length|0;
+  if (!N || mix <= 1e-6) return dpSimpleCopyWaveU8(src);
+
+  let seed = 2166136261 >>> 0;
+  for (let i=0;i<N;i++){
+    seed = Math.imul(seed ^ (src[i]|0), 16777619);
+  }
+  seed = (seed ^ Math.round(mix * 1048573)) >>> 0;
+
+  const depth = 0.85 + (mix * 2.35); // roughly +/-0.85..3.2 in 8-bit space
+  const out = new Uint8Array(N);
+  for (let i=0;i<N;i++){
+    let x = (seed + Math.imul(i + 1, 0x9E3779B1)) >>> 0;
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    const noise = ((((x >>> 0) / 4294967295) * 2) - 1) * depth;
+    out[i] = clamp(Math.round((src[i]|0) + noise), 0, 255);
+  }
+  return out;
+}
+
+function dpSimpleApplyControlU8(controlId, srcU8, rawValue, mode){
+  const src = (srcU8 instanceof Uint8Array) ? srcU8 : new Uint8Array(srcU8 || []);
+  const value = parseInt(rawValue, 10) || 0;
+  const signedAmt = Math.max(-1, Math.min(1, value / 100));
+  const amt = Math.abs(signedAmt);
+  const resolvedMode = dpSimpleNormControlMode(mode);
+  if (!src.length || amt <= 1e-6) return dpSimpleCopyWaveU8(src);
+
+  switch (String(controlId || '')){
+    case 'fold': {
+      if (typeof dpSimpleWavefoldU8 !== 'function') return dpSimpleCopyWaveU8(src);
+      const locked = dpSimpleWavefoldU8(src, amt);
+      if (resolvedMode !== 'excite' || typeof dpEvolveGenerate !== 'function') return locked;
+      const biased = dpEvolveGenerate(locked, 0.5 + (amt * 0.5), 'asymbend', { altSkew:true });
+      return dpSimpleBlendExciteU8(locked, biased, Math.min(0.72, 0.24 + (amt * 0.48)));
+    }
+    case 'skew':
+      if (resolvedMode === 'excite' && typeof dpEvolveGenerate === 'function'){
+        return dpEvolveGenerate(src, 0.5 + (signedAmt * 0.5), 'phasewarp_asym', { altSkew:true });
+      }
+      return (typeof dpSimpleSkewU8 === 'function')
+        ? dpSimpleSkewU8(src, signedAmt)
+        : dpSimpleCopyWaveU8(src);
+    case 'sat': {
+      if (typeof dpSimpleSaturateU8 !== 'function') return dpSimpleCopyWaveU8(src);
+      const locked = dpSimpleSaturateU8(src, amt);
+      if (resolvedMode !== 'excite' || typeof dpEvolveGenerate !== 'function') return locked;
+      const flavored = dpEvolveGenerate(locked, 0.18 + (amt * 0.54), 'cheby');
+      return dpSimpleBlendExciteU8(locked, flavored, Math.min(0.62, 0.16 + (amt * 0.46)));
+    }
+    case 'crush':
+      if (resolvedMode === 'excite' && typeof dpEvolveGenerate === 'function'){
+        const stepped = dpEvolveGenerate(src, amt, 'phasestep');
+        return dpSimpleAddDeterministicNoiseU8(stepped, 0.18 + (amt * 0.42));
+      }
+      return (typeof dpSimpleCrushU8 === 'function')
+        ? dpSimpleCrushU8(src, amt)
+        : dpSimpleCopyWaveU8(src);
+    case 'pwm': {
+      if (typeof dpEvolveGenerate !== 'function') return dpSimpleCopyWaveU8(src);
+      const locked = dpEvolveGenerate(src, 0.5 + (amt * 0.5), 'pwm');
+      if (resolvedMode !== 'excite') return locked;
+      const drifted = dpEvolveGenerate(locked, 0.5 + (amt * 0.5), 'phasewarp_asym', { altSkew:true });
+      return dpSimpleBlendExciteU8(locked, drifted, Math.min(0.54, 0.18 + (amt * 0.34)));
+    }
+    case 'pd':
+      if (typeof dpEvolveGenerate !== 'function') return dpSimpleCopyWaveU8(src);
+      return (resolvedMode === 'excite')
+        ? dpEvolveGenerate(src, amt, 'pdint')
+        : dpEvolveGenerate(src, amt, 'pdwarp');
+    case 'tone': {
+      const locked = (typeof dpSimpleToneU8 === 'function')
+        ? dpSimpleToneU8(src, signedAmt)
+        : dpSimpleCopyWaveU8(src);
+      if (resolvedMode !== 'excite' || typeof dpEvolveGenerate !== 'function') return locked;
+      const focused = dpEvolveGenerate(src, 0.5 + (signedAmt * 0.5), 'combform', { altSkew:true });
+      return dpSimpleBlendExciteU8(locked, focused, Math.min(0.68, 0.24 + (amt * 0.38)));
+    }
+    case 'smear': {
+      if (typeof dpEvolveGenerate !== 'function') return dpSimpleCopyWaveU8(src);
+      const locked = dpEvolveGenerate(src, amt, 'specsmear');
+      if (resolvedMode !== 'excite') return locked;
+      const diffused = dpEvolveGenerate(locked, amt, 'phase_dispersion');
+      return dpSimpleBlendExciteU8(locked, diffused, Math.min(0.56, 0.22 + (amt * 0.36)));
+    }
+    default:
+      return dpSimpleCopyWaveU8(src);
+  }
+}
+
 function dpApplySimpleModeStateU8(baseU8, state){
   const base = (baseU8 instanceof Uint8Array) ? new Uint8Array(baseU8) : new Uint8Array(baseU8||[]);
   const st = dpNormSimpleModeState(state);
@@ -280,29 +572,10 @@ function dpApplySimpleModeStateU8(baseU8, state){
   if (!base.length) return base;
 
   let out = new Uint8Array(base);
-  if ((st.fold|0) !== 0 && typeof dpSimpleWavefoldU8 === 'function'){
-    out = dpSimpleWavefoldU8(out, (st.fold|0) / 100);
-  }
-  if ((st.skew|0) !== 0 && typeof dpSimpleSkewU8 === 'function'){
-    out = dpSimpleSkewU8(out, (st.skew|0) / 100);
-  }
-  if ((st.sat|0) !== 0 && typeof dpSimpleSaturateU8 === 'function'){
-    out = dpSimpleSaturateU8(out, (st.sat|0) / 100);
-  }
-  if ((st.crush|0) !== 0 && typeof dpSimpleCrushU8 === 'function'){
-    out = dpSimpleCrushU8(out, (st.crush|0) / 100);
-  }
-  if ((st.pwm|0) !== 0 && typeof dpEvolveGenerate === 'function'){
-    out = dpEvolveGenerate(out, 0.5 + (((st.pwm|0) / 100) * 0.5), 'pwm');
-  }
-  if ((st.pd|0) !== 0 && typeof dpEvolveGenerate === 'function'){
-    out = dpEvolveGenerate(out, (st.pd|0) / 100, 'pdwarp');
-  }
-  if ((st.tone|0) !== 0 && typeof dpSimpleToneU8 === 'function'){
-    out = dpSimpleToneU8(out, (st.tone|0) / 100);
-  }
-  if ((st.smear|0) !== 0 && typeof dpEvolveGenerate === 'function'){
-    out = dpEvolveGenerate(out, (st.smear|0) / 100, 'specsmear');
+  for (const ctl of DP_SIMPLE_MODE_CONTROLS){
+    const value = st[ctl.id]|0;
+    if (value === 0) continue;
+    out = dpSimpleApplyControlU8(ctl.id, out, value, dpSimpleGetControlMode(st, ctl.id));
   }
 
   const target = out;
@@ -326,14 +599,14 @@ function dpApplySimpleModeStateU8(baseU8, state){
   if (typeof dpBlendU8 === 'function'){
     const toneAmt = (st.tone|0) / 100;
     const toneTopUp = dpSimplePostBlendWeight('tone', st.morph, toneAmt);
-    if (toneTopUp > 1e-6 && typeof dpSimpleToneU8 === 'function'){
-      out = dpBlendU8(out, dpSimpleToneU8(out, toneAmt), toneTopUp);
+    if (toneTopUp > 1e-6){
+      out = dpBlendU8(out, dpSimpleApplyControlU8('tone', out, st.tone|0, dpSimpleGetControlMode(st, 'tone')), toneTopUp);
     }
 
     const smearAmt = (st.smear|0) / 100;
     const smearTopUp = dpSimplePostBlendWeight('smear', st.morph, smearAmt);
-    if (smearTopUp > 1e-6 && typeof dpEvolveGenerate === 'function'){
-      out = dpBlendU8(out, dpEvolveGenerate(out, smearAmt, 'specsmear'), smearTopUp);
+    if (smearTopUp > 1e-6){
+      out = dpBlendU8(out, dpSimpleApplyControlU8('smear', out, st.smear|0, dpSimpleGetControlMode(st, 'smear')), smearTopUp);
     }
   }
 
@@ -363,6 +636,19 @@ function dpSimplePositionalAmount(index, count, distribution){
   return dpSimpleEase01((index|0) / denom);
 }
 
+function dpSimpleAnchorInfluence(t){
+  const tt = Math.max(0, Math.min(1, Number(t) || 0));
+  return dpSimpleEase01(1 - Math.abs((2 * tt) - 1));
+}
+
+function dpSimpleCopyWaveU8(src){
+  const out = (src instanceof Uint8Array) ? new Uint8Array(src) : new Uint8Array(src || []);
+  try{
+    if (src && src.displayRot !== undefined) out.displayRot = src.displayRot|0;
+  }catch(_){ }
+  return out;
+}
+
 function dpSimpleDistributedValue(ctl, rawValue, positionalAmt){
   const value = rawValue|0;
   if (value === 0) return 0;
@@ -378,19 +664,609 @@ function dpSimpleDistributedValue(ctl, rawValue, positionalAmt){
   return Math.max(ctl.min, Math.min(ctl.max, Math.round(value * weight)));
 }
 
-function dpSimpleFanoutState(state, index, count){
+function dpSimpleStateFromPositionalAmount(state, positionalAmt){
   const st = dpNormSimpleModeState(state);
-  if ((count|0) <= 1) return st;
-
-  const morphInfo = dpSimpleMorphInfo(st.morph);
-  const positionalAmt = dpSimplePositionalAmount(index, count, morphInfo.distribution);
   const out = Object.assign({}, st);
+  out.controlModes = Object.assign({}, st.controlModes);
 
   for (const ctl of DP_SIMPLE_MODE_CONTROLS){
     out[ctl.id] = dpSimpleDistributedValue(ctl, st[ctl.id], positionalAmt);
   }
 
   return out;
+}
+
+function dpSimpleFanoutState(state, index, count){
+  const st = dpNormSimpleModeState(state);
+  if ((count|0) <= 1) return st;
+
+  const morphInfo = dpSimpleMorphInfo(st.morph);
+  const positionalAmt = dpSimplePositionalAmount(index, count, morphInfo.distribution);
+  return dpSimpleStateFromPositionalAmount(st, positionalAmt);
+}
+
+function dpSimpleInterpolateReferenceU8(aU8, bU8, t, morph){
+  const aa = (aU8 instanceof Uint8Array) ? aU8 : new Uint8Array(aU8 || []);
+  const bb = (bU8 instanceof Uint8Array) ? bU8 : new Uint8Array(bU8 || []);
+  const mix = Math.max(0, Math.min(1, Number(t) || 0));
+  const info = dpSimpleMorphInfo(morph);
+
+  if (!aa.length) return dpSimpleCopyWaveU8(bb);
+  if (!bb.length) return dpSimpleCopyWaveU8(aa);
+  if (info.blend === 'spectral' && typeof dpSimpleSpectralMorphU8 === 'function'){
+    return dpSimpleSpectralMorphU8(aa, bb, mix);
+  }
+  if (info.blend === 'phaseWarp' && typeof dpSimplePhaseWarpMorphU8 === 'function'){
+    return dpSimplePhaseWarpMorphU8(aa, bb, mix);
+  }
+  if (info.blend === 'equalPower' && typeof dpSimpleEqualPowerMorphU8 === 'function'){
+    return dpSimpleEqualPowerMorphU8(aa, bb, mix);
+  }
+  if (info.blend === 'magnitudeOnly' && typeof dpSimpleMagnitudeOnlyMorphU8 === 'function'){
+    return dpSimpleMagnitudeOnlyMorphU8(aa, bb, mix);
+  }
+  if (info.blend === 'phaseOnly' && typeof dpSimplePhaseOnlyMorphU8 === 'function'){
+    return dpSimplePhaseOnlyMorphU8(aa, bb, mix);
+  }
+  if (typeof dpBlendU8 === 'function') return dpBlendU8(aa, bb, mix);
+
+  const out = new Uint8Array(Math.min(aa.length, bb.length));
+  for (let i=0;i<out.length;i++){
+    out[i] = clamp(Math.round((aa[i]|0) + (((bb[i]|0) - (aa[i]|0)) * mix)), 0, 255);
+  }
+  try{
+    const rot = (mix < 0.5 ? aa : bb).displayRot;
+    if (rot !== undefined) out.displayRot = rot|0;
+  }catch(_){ }
+  return out;
+}
+
+function dpSimpleResidualFromReference(liveU8, referenceU8){
+  const live = (liveU8 instanceof Uint8Array) ? liveU8 : new Uint8Array(liveU8 || []);
+  const ref = (referenceU8 instanceof Uint8Array) ? referenceU8 : new Uint8Array(referenceU8 || []);
+  const N = Math.min(live.length|0, ref.length|0);
+  const out = new Int16Array(N);
+  for (let i=0;i<N;i++) out[i] = (live[i]|0) - (ref[i]|0);
+  return out;
+}
+
+function dpSimpleApplyResidualU8(baseU8, residual, weight, fallbackU8){
+  const base = (baseU8 instanceof Uint8Array) ? baseU8 : new Uint8Array(baseU8 || []);
+  const out = new Uint8Array(base.length|0);
+  const residualArr = (residual instanceof Int16Array) ? residual : new Int16Array(residual || []);
+  const mix = Math.max(0, Number(weight));
+  for (let i=0;i<out.length;i++){
+    const delta = (i < residualArr.length) ? residualArr[i] : 0;
+    out[i] = clamp(Math.round((base[i]|0) + (delta * mix)), 0, 255);
+  }
+  try{
+    const rotSrc = fallbackU8 || base;
+    if (rotSrc && rotSrc.displayRot !== undefined) out.displayRot = rotSrc.displayRot|0;
+  }catch(_){ }
+  return out;
+}
+
+function dpEnsureReactiveSimpleModeRuntime(runtime){
+  if (!runtime || typeof runtime !== 'object') return {
+    capture: null,
+    selectionSignature: '',
+    anchorSignature: '',
+    tableInteraction: 'classic'
+  };
+  if (!runtime.reactive || typeof runtime.reactive !== 'object'){
+    runtime.reactive = {};
+  }
+  const reactive = runtime.reactive;
+  if (!Object.prototype.hasOwnProperty.call(reactive, 'capture')) reactive.capture = null;
+  if (!Object.prototype.hasOwnProperty.call(reactive, 'selectionSignature')) reactive.selectionSignature = '';
+  if (!Object.prototype.hasOwnProperty.call(reactive, 'anchorSignature')) reactive.anchorSignature = '';
+  reactive.tableInteraction = dpSimpleNormTableInteraction(reactive.tableInteraction);
+  return reactive;
+}
+
+function dpInvalidateReactiveSimpleMode(runtime, opts){
+  const reactive = dpEnsureReactiveSimpleModeRuntime(runtime);
+  reactive.capture = null;
+  if (opts && Object.prototype.hasOwnProperty.call(opts, 'selectionSignature')){
+    reactive.selectionSignature = String(opts.selectionSignature || '');
+  }
+  if (opts && Object.prototype.hasOwnProperty.call(opts, 'anchorSignature')){
+    reactive.anchorSignature = String(opts.anchorSignature || '');
+  }
+  if (opts && Object.prototype.hasOwnProperty.call(opts, 'tableInteraction')){
+    reactive.tableInteraction = dpSimpleNormTableInteraction(opts.tableInteraction);
+  }
+  return reactive;
+}
+
+function dpSimpleWaveMeanAbsDiff(aU8, bU8){
+  const aa = (aU8 instanceof Uint8Array) ? aU8 : new Uint8Array(aU8 || []);
+  const bb = (bU8 instanceof Uint8Array) ? bU8 : new Uint8Array(bU8 || []);
+  const N = Math.min(aa.length|0, bb.length|0);
+  if (N <= 0) return 0;
+  let sum = 0;
+  for (let i=0;i<N;i++) sum += Math.abs((aa[i]|0) - (bb[i]|0));
+  return sum / N;
+}
+
+function dpFindReactiveSegmentGuide(orderedTargets, prevIdx, nextIdx, liveBySlot, morph){
+  const slots = Array.isArray(orderedTargets) ? orderedTargets : [];
+  const total = slots.length|0;
+  if (total <= 0) return null;
+  const start = prevIdx|0;
+  const end = nextIdx|0;
+  let span = end - start;
+  if (span <= 0) span += total;
+  if (span < 3) return null;
+
+  const prevSlot = slots[start]|0;
+  const nextSlot = slots[end]|0;
+  const prevRec = liveBySlot[prevSlot];
+  const nextRec = liveBySlot[nextSlot];
+  if (!prevRec || !prevRec.dataU8 || !prevRec.dataU8.length || !nextRec || !nextRec.dataU8 || !nextRec.dataU8.length){
+    return null;
+  }
+
+  let best = null;
+  let sum = 0;
+  let count = 0;
+  for (let offset=1; offset<span; offset++){
+    const idx = (start + offset) % total;
+    const slot = slots[idx]|0;
+    const liveRec = liveBySlot[slot];
+    if (!liveRec || !liveRec.dataU8 || !liveRec.dataU8.length) continue;
+    const pos = offset / span;
+    const straightRef = dpSimpleInterpolateReferenceU8(prevRec.dataU8, nextRec.dataU8, pos, morph);
+    const deviation = dpSimpleWaveMeanAbsDiff(liveRec.dataU8, straightRef);
+    sum += deviation;
+    count += 1;
+    if (!best || deviation > best.deviation){
+      best = { slot, idx, offset, pos, deviation };
+    }
+  }
+
+  if (!best || count <= 1) return null;
+  const avg = sum / count;
+  const threshold = Math.max(8.5, avg * 1.22);
+  const prominence = best.deviation - avg;
+  if (best.deviation < threshold || prominence < 3.5) return null;
+  return best;
+}
+
+function dpResolveReactiveSegmentReference(points, pos, morph){
+  const resolved = Array.isArray(points) ? points.filter(Boolean).slice().sort((a,b)=>a.pos-b.pos) : [];
+  const u = Math.max(0, Math.min(1, Number(pos) || 0));
+  if (!resolved.length) return { referenceU8:new Uint8Array(0), left:null, right:null, localT:0 };
+  for (const point of resolved){
+    if (Math.abs(u - point.pos) <= 1e-6){
+      return {
+        referenceU8: dpSimpleCopyWaveU8(point.wave),
+        left: point,
+        right: point,
+        localT: 0
+      };
+    }
+  }
+  let left = resolved[0];
+  let right = resolved[resolved.length - 1];
+  for (let i=0;i<resolved.length-1;i++){
+    const a = resolved[i];
+    const b = resolved[i+1];
+    if (u >= a.pos && u <= b.pos){
+      left = a;
+      right = b;
+      break;
+    }
+  }
+  const denom = Math.max(1e-6, (right.pos - left.pos));
+  const localT = Math.max(0, Math.min(1, (u - left.pos) / denom));
+  return {
+    referenceU8: dpSimpleInterpolateReferenceU8(left.wave, right.wave, localT, morph),
+    left,
+    right,
+    localT
+  };
+}
+
+function dpSimpleReactiveStateSignature(state){
+  const st = dpNormSimpleModeState(state);
+  const bits = [st.mode, st.tableInteraction, st.morph];
+  for (const ctl of DP_SIMPLE_MODE_CONTROLS){
+    bits.push(`${ctl.id}:${st[ctl.id]|0}:${dpSimpleGetControlMode(st, ctl.id)}`);
+  }
+  return bits.join('|');
+}
+
+function dpSimpleStateDeltaAmount(state, baseState){
+  const st = dpNormSimpleModeState(state);
+  const base = dpNormSimpleModeState(baseState);
+  let maxDelta = (st.morph === base.morph) ? 0 : 1;
+  for (const ctl of DP_SIMPLE_MODE_CONTROLS){
+    const span = Math.max(1, (ctl.max|0) - (ctl.min|0));
+    const delta = Math.abs((st[ctl.id]|0) - (base[ctl.id]|0)) / span;
+    if (delta > maxDelta) maxDelta = delta;
+    if (dpSimpleGetControlMode(st, ctl.id) !== dpSimpleGetControlMode(base, ctl.id)) maxDelta = 1;
+  }
+  return Math.max(0, Math.min(1, maxDelta));
+}
+
+function dpSimpleReactiveResidualWeight(meta, motionAmt, baseKeep){
+  const keepFloor = Math.max(0, Math.min(1, Number(baseKeep)));
+  const influence = Math.max(0, Math.min(1, Number(meta && meta.influence)));
+  let slotKeep = Math.max(keepFloor, keepFloor + ((1 - influence) * 0.28));
+  let motion = Math.max(0, Math.min(1, Number(motionAmt) || 0));
+  if (meta && meta.selectedGuide){
+    slotKeep = Math.min(slotKeep, Math.max(0.02, keepFloor * 0.35));
+    motion = 1 - Math.pow(1 - motion, 2.35);
+  }
+  return slotKeep + ((1 - motion) * (1 - slotKeep));
+}
+
+function dpSimpleBlendGuideReferenceU8(baseU8, guideU8, mix){
+  const base = (baseU8 instanceof Uint8Array) ? baseU8 : new Uint8Array(baseU8 || []);
+  const guide = (guideU8 instanceof Uint8Array) ? guideU8 : new Uint8Array(guideU8 || []);
+  const amount = Math.max(0, Math.min(1, Number(mix) || 0));
+  if (!base.length) return dpSimpleCopyWaveU8(guide);
+  if (!guide.length) return dpSimpleCopyWaveU8(base);
+  if (typeof dpBlendU8 === 'function') return dpBlendU8(base, guide, amount);
+  return dpSimpleInterpolateReferenceU8(base, guide, amount, 'linear');
+}
+
+function dpPrepareReactiveSimpleRenderCache(capture, state){
+  if (!capture || !capture.bySlot) return null;
+  const key = dpSimpleReactiveStateSignature(state);
+  if (capture.renderCache && capture.renderCache.key === key) return capture.renderCache;
+
+  const currentState = dpNormSimpleModeState(state);
+  const motionAmt = dpSimpleStateDeltaAmount(currentState, capture.startState);
+  const anchorState = dpSimpleStateFromPositionalAmount(currentState, 0);
+  const softAnchors = !!capture.softAnchors;
+  const anchorOutputs = Object.create(null);
+  const guideOutputs = Object.create(null);
+  const segmentPoints = Object.create(null);
+
+  for (const segment of Array.isArray(capture.segments) ? capture.segments : []){
+    const segPoints = [];
+    for (const point of Array.isArray(segment.points) ? segment.points : []){
+      const meta = capture.bySlot[point.slot|0];
+      if (!meta || !meta.liveU8 || !meta.liveU8.length) continue;
+      let wave = meta.liveU8;
+      if (point.anchor){
+        const slotState = softAnchors
+          ? dpSimpleFanoutState(currentState, meta.index|0, meta.count|0)
+          : anchorState;
+        wave = dpApplySimpleModeStateU8(meta.referenceU8, slotState);
+        anchorOutputs[point.slot|0] = wave;
+      } else if (point.guide){
+        const slotState = softAnchors
+          ? dpSimpleFanoutState(currentState, meta.index|0, meta.count|0)
+          : dpSimpleStateFromPositionalAmount(currentState, meta.influence);
+        const targetApproxU8 = dpApplySimpleModeStateU8(meta.referenceU8, slotState);
+        const residualWeight = dpSimpleReactiveResidualWeight(meta, motionAmt, 0.18);
+        wave = dpSimpleApplyResidualU8(targetApproxU8, meta.residual, residualWeight, meta.liveU8);
+        guideOutputs[point.slot|0] = wave;
+      }
+      segPoints.push({
+        slot: point.slot|0,
+        pos: Number(point.pos) || 0,
+        wave,
+        anchor: !!point.anchor,
+        guide: !!point.guide
+      });
+    }
+    segmentPoints[segment.id|0] = segPoints;
+  }
+
+  capture.renderCache = {
+    key,
+    state: currentState,
+    motionAmt,
+    anchorOutputs,
+    guideOutputs,
+    segmentPoints
+  };
+  return capture.renderCache;
+}
+
+function dpBuildReactiveSimpleCapture(opts){
+  opts = opts || {};
+  const liveBySlot = (opts.liveBySlot && typeof opts.liveBySlot === 'object') ? opts.liveBySlot : {};
+  const startState = dpNormSimpleModeState(opts.startState);
+  const softAnchors = !!opts.softAnchors;
+  const targets = Array.from(opts.targets || [])
+    .map(n=>n|0)
+    .filter((slot, idx, arr)=>slot>=0 && slot<64 && arr.indexOf(slot) === idx);
+  const anchorSlots = Array.from(opts.anchorSlots || [])
+    .map(n=>n|0)
+    .filter((slot, idx, arr)=>slot>=0 && slot<64 && targets.includes(slot) && arr.indexOf(slot) === idx)
+    ;
+  const forcedGuideSlots = Array.from(opts.guideSlots || [])
+    .map(n=>n|0)
+    .filter((slot, idx, arr)=>slot>=0 && slot<64 && targets.includes(slot) && !anchorSlots.includes(slot) && arr.indexOf(slot) === idx)
+    ;
+  const forcedGuideSet = new Set(forcedGuideSlots);
+  const anchored = anchorSlots.length >= 2;
+  const capture = {
+    anchored,
+    softAnchors: anchored && softAnchors,
+    startState,
+    morph: startState.morph,
+    targets: targets.slice(),
+    anchorSlots: anchored ? anchorSlots.slice() : [],
+    selectedGuideSlots: anchored ? forcedGuideSlots.slice() : [],
+    guideSlots: [],
+    segments: [],
+    bySlot: Object.create(null)
+  };
+
+  if (!targets.length) return capture;
+
+  if (!anchored){
+    const count = targets.length|0;
+    for (let i=0;i<count;i++){
+      const slot = targets[i]|0;
+      const liveRec = liveBySlot[slot];
+      if (!liveRec || !liveRec.dataU8 || !liveRec.dataU8.length) continue;
+      const referenceU8 = dpSimpleCopyWaveU8(liveRec.dataU8);
+      const startSlotState = dpSimpleFanoutState(startState, i, count);
+      const startApproxU8 = dpApplySimpleModeStateU8(referenceU8, startSlotState);
+      capture.bySlot[slot] = {
+        slot,
+        anchor: false,
+        anchored: false,
+        index: i,
+        count,
+        liveU8: dpSimpleCopyWaveU8(liveRec.dataU8),
+        referenceU8,
+        startApproxU8,
+        residual: dpSimpleResidualFromReference(liveRec.dataU8, startApproxU8),
+        prevAnchorSlot: null,
+        nextAnchorSlot: null,
+        t: null,
+        influence: 1
+      };
+    }
+    return capture;
+  }
+
+  const orderedTargets = targets.slice();
+  const indexBySlot = Object.create(null);
+  for (let i=0;i<orderedTargets.length;i++) indexBySlot[orderedTargets[i]] = i;
+  const anchorIndices = anchorSlots.map(slot=>indexBySlot[slot]).filter(i=>i>=0).sort((a,b)=>a-b);
+  const seen = new Set();
+
+  for (let i=0;i<anchorIndices.length;i++){
+    const prevIdx = anchorIndices[i]|0;
+    const nextIdx = anchorIndices[(i+1) % anchorIndices.length]|0;
+    const prevSlot = orderedTargets[prevIdx]|0;
+    const nextSlot = orderedTargets[nextIdx]|0;
+    const prevRec = liveBySlot[prevSlot];
+    const nextRec = liveBySlot[nextSlot];
+    let span = nextIdx - prevIdx;
+    if (span <= 0) span += orderedTargets.length;
+    if (span <= 0) continue;
+    const segmentGuides = [];
+    const segmentGuideSet = new Set();
+    for (let offset=1; offset<span; offset++){
+      const idx = (prevIdx + offset) % orderedTargets.length;
+      const slot = orderedTargets[idx]|0;
+      if (!forcedGuideSet.has(slot)) continue;
+      const forcedRec = liveBySlot[slot];
+      if (!forcedRec || !forcedRec.dataU8 || !forcedRec.dataU8.length) continue;
+      const straightRef = (prevRec && prevRec.dataU8 && nextRec && nextRec.dataU8)
+        ? dpSimpleInterpolateReferenceU8(prevRec.dataU8, nextRec.dataU8, offset / span, startState.morph)
+        : dpSimpleCopyWaveU8(forcedRec.dataU8);
+      segmentGuides.push({
+        slot,
+        idx,
+        offset,
+        pos: offset / span,
+        forced: true,
+        wave: dpSimpleBlendGuideReferenceU8(straightRef, forcedRec.dataU8, 0.3)
+      });
+      segmentGuideSet.add(slot);
+    }
+    const guide = dpFindReactiveSegmentGuide(orderedTargets, prevIdx, nextIdx, liveBySlot, startState.morph);
+    if (guide && !segmentGuideSet.has(guide.slot|0)){
+      const guideRec = liveBySlot[guide.slot];
+      segmentGuides.push(Object.assign({}, guide, {
+        forced:false,
+        wave: guideRec && guideRec.dataU8 ? guideRec.dataU8 : null
+      }));
+      segmentGuideSet.add(guide.slot|0);
+    }
+    segmentGuides.sort((a,b)=>(Number(a.pos) || 0) - (Number(b.pos) || 0));
+    for (const segmentGuide of segmentGuides){
+      capture.guideSlots.push(segmentGuide.slot|0);
+    }
+    const segmentPoints = [
+      { slot: prevSlot, pos:0, wave: prevRec && prevRec.dataU8, anchor:true, guide:false },
+      ...segmentGuides.map((segmentGuide)=>({
+        slot: segmentGuide.slot|0,
+        pos: Number(segmentGuide.pos) || 0,
+        wave: segmentGuide.wave || (liveBySlot[segmentGuide.slot] && liveBySlot[segmentGuide.slot].dataU8),
+        anchor:false,
+        guide:true
+      })),
+      { slot: nextSlot, pos:1, wave: nextRec && nextRec.dataU8, anchor:true, guide:false }
+    ].filter(point=>point && point.wave && point.wave.length);
+    const segmentGuideSlots = segmentGuides.map((segmentGuide)=>segmentGuide.slot|0);
+    const segmentGuideLookup = new Set(segmentGuideSlots);
+    const segmentId = capture.segments.length|0;
+    capture.segments.push({
+      id: segmentId,
+      prevSlot,
+      nextSlot,
+      points: segmentPoints.map((point)=>({
+        slot: point.slot|0,
+        pos: Number(point.pos) || 0,
+        anchor: !!point.anchor,
+        guide: !!point.guide
+      }))
+    });
+
+    for (let offset=0; offset<=span; offset++){
+      const idx = (prevIdx + offset) % orderedTargets.length;
+      const slot = orderedTargets[idx]|0;
+      if (seen.has(slot)) continue;
+      const liveRec = liveBySlot[slot];
+      if (!liveRec || !liveRec.dataU8 || !liveRec.dataU8.length) continue;
+
+      const isAnchor = (slot === prevSlot) || (slot === nextSlot);
+      const t = isAnchor ? ((slot === prevSlot) ? 0 : 1) : (offset / span);
+      const influence = isAnchor ? 0 : dpSimpleAnchorInfluence(t);
+      const guideSlot = segmentGuideSlots.length ? (segmentGuideSlots[0]|0) : null;
+      const isGuide = !isAnchor && segmentGuideLookup.has(slot);
+      const resolvedRef = isAnchor
+        ? {
+            referenceU8: dpSimpleCopyWaveU8(liveRec.dataU8),
+            left: null,
+            right: null,
+            localT: 0
+          }
+        : dpResolveReactiveSegmentReference(segmentPoints, t, startState.morph);
+      const referenceU8 = isAnchor
+        ? dpSimpleCopyWaveU8(liveRec.dataU8)
+        : resolvedRef.referenceU8;
+      const startSlotState = capture.softAnchors
+        ? dpSimpleFanoutState(startState, idx, orderedTargets.length)
+        : (isAnchor
+          ? dpSimpleStateFromPositionalAmount(startState, 0)
+          : dpSimpleStateFromPositionalAmount(startState, influence));
+      const startApproxU8 = (!capture.softAnchors && isAnchor)
+        ? dpSimpleCopyWaveU8(liveRec.dataU8)
+        : dpApplySimpleModeStateU8(referenceU8, startSlotState);
+
+      capture.bySlot[slot] = {
+        slot,
+        anchor: isAnchor,
+        anchored: true,
+        index: idx,
+        count: orderedTargets.length,
+        liveU8: dpSimpleCopyWaveU8(liveRec.dataU8),
+        referenceU8,
+        startApproxU8,
+        residual: isAnchor ? new Int16Array(0) : dpSimpleResidualFromReference(liveRec.dataU8, startApproxU8),
+        prevAnchorSlot: prevSlot,
+        nextAnchorSlot: nextSlot,
+        segmentId,
+        segmentGuideSlot: guideSlot,
+        segmentGuideSlots: segmentGuideSlots.slice(),
+        selectedGuide: !isAnchor && forcedGuideSet.has(slot),
+        guide: isGuide,
+        t,
+        influence
+      };
+      seen.add(slot);
+    }
+  }
+
+  capture.guideSlots = capture.guideSlots
+    .filter((slot, idx, arr)=>slot>=0 && arr.indexOf(slot) === idx);
+  return capture;
+}
+
+function dpRenderReactiveSimpleSlot(capture, slot, state){
+  if (!capture || !capture.bySlot) return null;
+  const meta = capture.bySlot[slot|0];
+  if (!meta || !meta.liveU8 || !meta.liveU8.length) return null;
+  const renderCache = dpPrepareReactiveSimpleRenderCache(capture, state);
+  const currentState = renderCache ? renderCache.state : dpNormSimpleModeState(state);
+  if (meta.anchor && renderCache && renderCache.anchorOutputs && renderCache.anchorOutputs[slot|0]){
+    return dpSimpleCopyWaveU8(renderCache.anchorOutputs[slot|0]);
+  }
+  if (meta.guide && renderCache && renderCache.guideOutputs && renderCache.guideOutputs[slot|0]){
+    return dpSimpleCopyWaveU8(renderCache.guideOutputs[slot|0]);
+  }
+  const slotState = meta.anchored
+    ? (capture.softAnchors
+      ? dpSimpleFanoutState(currentState, meta.index|0, meta.count|0)
+      : dpSimpleStateFromPositionalAmount(currentState, meta.influence))
+    : dpSimpleFanoutState(currentState, meta.index|0, meta.count|0);
+  let reactiveReferenceU8 = meta.referenceU8;
+  if (meta.anchored && renderCache && renderCache.segmentPoints){
+    const segPoints = renderCache.segmentPoints[meta.segmentId|0];
+    if (Array.isArray(segPoints) && segPoints.length){
+      reactiveReferenceU8 = dpResolveReactiveSegmentReference(segPoints, meta.t, currentState.morph).referenceU8;
+    }
+  }
+  const targetApproxU8 = dpApplySimpleModeStateU8(reactiveReferenceU8, slotState);
+
+  if (!meta.anchored){
+    return dpSimpleApplyResidualU8(targetApproxU8, meta.residual, 1, meta.liveU8);
+  }
+  const residualWeight = dpSimpleReactiveResidualWeight(meta, renderCache ? renderCache.motionAmt : 1, 0.12);
+  return dpSimpleApplyResidualU8(targetApproxU8, meta.residual, residualWeight, meta.liveU8);
+}
+
+function dpSimpleCaptureBaseFromRuntime(runtime, liveRec, state, index, count){
+  if (!runtime || typeof runtime !== 'object') return null;
+  if (!runtime.sources || typeof runtime.sources !== 'object'){
+    runtime.sources = Object.create(null);
+  }
+  if (!liveRec || !liveRec.dataU8 || !liveRec.dataU8.length) return null;
+
+  const slot = liveRec.slot|0;
+  const cached = runtime.sources[slot] || null;
+  const slotState = dpSimpleFanoutState(state, index, count);
+
+  if (cached && cached.dataU8 && cached.dataU8.length === liveRec.dataU8.length){
+    if (cached.resultU8 && cached.resultU8.length === liveRec.dataU8.length){
+      if (dpSimpleWaveMatches(cached.resultU8, liveRec.dataU8)){
+        runtime.source = { slot, dataU8: dpSimpleCopyWaveU8(cached.dataU8) };
+        return {
+          slot,
+          name: liveRec.name,
+          heat: liveRec.heat,
+          dataU8: dpSimpleCopyWaveU8(cached.dataU8)
+        };
+      }
+    }
+    const expected = dpApplySimpleModeStateU8(cached.dataU8, slotState);
+    if (dpSimpleWaveMatches(expected, liveRec.dataU8)){
+      cached.resultU8 = dpSimpleCopyWaveU8(expected);
+      runtime.source = { slot, dataU8: dpSimpleCopyWaveU8(cached.dataU8) };
+      return {
+        slot,
+        name: liveRec.name,
+        heat: liveRec.heat,
+        dataU8: dpSimpleCopyWaveU8(cached.dataU8)
+      };
+    }
+  }
+
+  const fresh = dpSimpleCopyWaveU8(liveRec.dataU8);
+  runtime.sources[slot] = {
+    dataU8: dpSimpleCopyWaveU8(fresh),
+    resultU8: dpSimpleCopyWaveU8(fresh)
+  };
+  runtime.source = { slot, dataU8: dpSimpleCopyWaveU8(fresh) };
+  return {
+    slot,
+    name: liveRec.name,
+    heat: liveRec.heat,
+    dataU8: fresh
+  };
+}
+
+function dpInvalidateSimpleModeSources(runtime, opts){
+  if (!runtime || typeof runtime !== 'object') return;
+  if (opts && opts.cancelGesture){
+    if (runtime.raf){
+      try{ cancelAnimationFrame(runtime.raf); }catch(_){ }
+    }
+    runtime.raf = 0;
+    runtime.gesture = null;
+    runtime.pendingPreview = false;
+    runtime.pendingBase = null;
+    runtime.pendingPaint = null;
+    runtime.pendingTouch = null;
+    runtime.pendingLabel = 'Table Mode';
+  }
+  runtime.source = null;
+  runtime.sources = Object.create(null);
+  runtime.lastControlId = null;
+  dpInvalidateReactiveSimpleMode(runtime);
 }
 
 const SIMPLE_MODE_STATE = root.__digiproSimpleModeState
@@ -401,6 +1277,7 @@ root.__digiproSimpleModeState = SIMPLE_MODE_STATE;
 const SIMPLE_MODE_RUNTIME = root.__digiproSimpleModeRuntime || {
   source: null,
   sources: Object.create(null),
+  lastControlId: null,
   gesture: null,
   raf: 0,
   pendingPreview: false,
@@ -412,7 +1289,47 @@ const SIMPLE_MODE_RUNTIME = root.__digiproSimpleModeRuntime || {
 if (!SIMPLE_MODE_RUNTIME.sources || typeof SIMPLE_MODE_RUNTIME.sources !== 'object'){
   SIMPLE_MODE_RUNTIME.sources = Object.create(null);
 }
+if (!Object.prototype.hasOwnProperty.call(SIMPLE_MODE_RUNTIME, 'lastControlId')){
+  SIMPLE_MODE_RUNTIME.lastControlId = null;
+}
+dpEnsureReactiveSimpleModeRuntime(SIMPLE_MODE_RUNTIME);
 root.__digiproSimpleModeRuntime = SIMPLE_MODE_RUNTIME;
+root.__digiproInvalidateSimpleModeSources = function(opts){
+  dpInvalidateSimpleModeSources(SIMPLE_MODE_RUNTIME, opts);
+};
+root.dpSimpleCaptureBaseFromRuntime = dpSimpleCaptureBaseFromRuntime;
+root.dpInvalidateSimpleModeSources = dpInvalidateSimpleModeSources;
+root.dpInvalidateReactiveSimpleMode = dpInvalidateReactiveSimpleMode;
+root.dpSimpleGetControlMode = dpSimpleGetControlMode;
+root.dpSimpleToggleControlMode = dpSimpleToggleControlMode;
+root.dpSimpleModeStatesMatch = dpSimpleModeStatesMatch;
+root.dpBuildReactiveSimpleCapture = dpBuildReactiveSimpleCapture;
+root.dpRenderReactiveSimpleSlot = dpRenderReactiveSimpleSlot;
+root.dpSimpleInterpolateReferenceU8 = dpSimpleInterpolateReferenceU8;
+root.dpSimpleApplyResidualU8 = dpSimpleApplyResidualU8;
+root.dpSimpleStateFromPositionalAmount = dpSimpleStateFromPositionalAmount;
+root.dpSimpleReactiveResidualWeight = dpSimpleReactiveResidualWeight;
+root.dpSimpleNormTableInteraction = dpSimpleNormTableInteraction;
+root.dpSimpleSlotsSignature = dpSimpleSlotsSignature;
+root.dpResolveReactiveSelectionPlan = dpResolveReactiveSelectionPlan;
+root.dpResolveReactiveTargetPlan = dpResolveReactiveTargetPlan;
+
+if (!root.__digiproSimpleModeBankHookInstalled){
+  const prevUndoOnChange = (typeof root.__digiproUndoOnChange === 'function') ? root.__digiproUndoOnChange : null;
+  root.__digiproUndoOnChange = function(info){
+    if (info && info.domain === 'bank'){
+      if (info.preserveSimpleModeSources){
+        dpInvalidateReactiveSimpleMode(SIMPLE_MODE_RUNTIME);
+      } else {
+        dpInvalidateSimpleModeSources(SIMPLE_MODE_RUNTIME, { cancelGesture:true });
+      }
+    }
+    if (typeof prevUndoOnChange === 'function'){
+      try{ prevUndoOnChange(info); }catch(_){ }
+    }
+  };
+  root.__digiproSimpleModeBankHookInstalled = true;
+}
 
 function dpPersistSimpleModeState(next, opts){
   Object.assign(SIMPLE_MODE_STATE, dpNormSimpleModeState(next || SIMPLE_MODE_STATE));
@@ -431,16 +1348,67 @@ function dpResetSimpleModeRuntime(){
   SIMPLE_MODE_RUNTIME.pendingBase = null;
   SIMPLE_MODE_RUNTIME.pendingPaint = null;
   SIMPLE_MODE_RUNTIME.pendingTouch = null;
+  SIMPLE_MODE_RUNTIME.lastControlId = null;
+  dpInvalidateReactiveSimpleMode(SIMPLE_MODE_RUNTIME);
 }
 
 root.__digiproCaptureSimpleModeState = function(){
   return dpNormSimpleModeState(SIMPLE_MODE_STATE);
 };
 
-root.__digiproApplySimpleModeState = function(next){
+root.__digiproApplySimpleModeState = function(next, opts){
   dpResetSimpleModeRuntime();
+  if (opts && opts.fromHistory){
+    SIMPLE_MODE_RUNTIME.source = null;
+    SIMPLE_MODE_RUNTIME.sources = Object.create(null);
+  }
   return dpPersistSimpleModeState(next || dpSimpleDefaultState());
 };
+
+root.__digiproHandleSimpleModeSelectionChange = function(info){
+  try{
+    const reactive = dpEnsureReactiveSimpleModeRuntime(SIMPLE_MODE_RUNTIME);
+    const selectedSlots = Array.isArray(info && info.selectedSlots)
+      ? info.selectedSlots.slice().map(n=>n|0).filter(n=>n>=0 && n<64).sort((a,b)=>a-b)
+      : Array.from(SELECTED || []).map(n=>n|0).filter(n=>n>=0 && n<64).sort((a,b)=>a-b);
+    const selectedLiveBySlot = Object.create(null);
+    for (const slot of selectedSlots){
+      const snap = simpleSlotSnapshotForSelection(slot);
+      if (snap && snap.dataU8 && snap.dataU8.length) selectedLiveBySlot[slot] = snap;
+    }
+    const selectionPlan = dpResolveReactiveSelectionPlan(selectedSlots, selectedLiveBySlot);
+    const anchorSlots = Array.isArray(info && info.anchorSlots)
+      ? info.anchorSlots.slice().map(n=>n|0).filter(n=>selectedSlots.includes(n)).sort((a,b)=>a-b)
+      : selectionPlan.anchorSlots;
+    const selectionSignature = dpSimpleSlotsSignature(selectedSlots);
+    const anchorSignature = dpSimpleSlotsSignature(anchorSlots);
+    if (reactive.selectionSignature !== selectionSignature || reactive.anchorSignature !== anchorSignature){
+      dpInvalidateReactiveSimpleMode(SIMPLE_MODE_RUNTIME, {
+        selectionSignature,
+        anchorSignature,
+        tableInteraction: dpNormSimpleModeState(SIMPLE_MODE_STATE).tableInteraction
+      });
+    }
+  }catch(_){ }
+  try{
+    if (typeof root.__digiproRefreshSimpleModeUi === 'function'){
+      root.__digiproRefreshSimpleModeUi(info || null);
+    }
+  }catch(_){ }
+};
+
+function simpleSlotSnapshotForSelection(slot){
+  slot = slot|0;
+  if (!(slot>=0 && slot<64)) return null;
+  const editorSlot = (EDIT && typeof EDIT.slot === 'number') ? (EDIT.slot|0) : -1;
+  const libRec = (LIB && LIB.waves) ? (LIB.waves[slot] || null) : null;
+  const hasLibWave = !!(libRec && libRec.dataU8 && libRec.dataU8.length);
+  if (slot === editorSlot && LIB && LIB.dirty && LIB.dirty.has && LIB.dirty.has(slot) && EDIT && EDIT.dataU8 && EDIT.dataU8.length){
+    return { slot, dataU8: dpSimpleCopyWaveU8(EDIT.dataU8) };
+  }
+  if (!hasLibWave) return null;
+  return { slot, dataU8: dpSimpleCopyWaveU8(libRec.dataU8) };
+}
 
 
 // -------------- editor UI --------------
@@ -907,7 +1875,9 @@ root.__digiproApplySimpleModeState = function(next){
         .filter(s=>s>=0 && s<64)
         .sort((a,b)=>a-b);
       const scope = sel.length ? 'selected' : 'wavetable';
-      const candidates = sel.length ? sel : Array.from({length:64}, (_, idx)=>idx|0);
+      const candidates = sel.length
+        ? sel
+        : Array.from({length:64}, (_, slot)=>slot|0);
       const targets = [];
       const liveBySlot = Object.create(null);
 
@@ -921,34 +1891,71 @@ root.__digiproApplySimpleModeState = function(next){
       return { scope, targets, liveBySlot };
     }
 
-    function captureSimpleBase(liveRec, index, count){
-      if (!liveRec || !liveRec.dataU8 || !liveRec.dataU8.length) return null;
-
-      const slot = liveRec.slot|0;
-      const cached = SIMPLE_MODE_RUNTIME.sources ? SIMPLE_MODE_RUNTIME.sources[slot] : null;
-      const slotState = dpSimpleFanoutState(SIMPLE_MODE_STATE, index, count);
-
-      if (cached && cached.dataU8 && cached.dataU8.length === liveRec.dataU8.length){
-        const expected = dpApplySimpleModeStateU8(cached.dataU8, slotState);
-        if (dpSimpleWaveMatches(expected, liveRec.dataU8)){
-          return {
-            slot,
-            name: liveRec.name,
-            heat: liveRec.heat,
-            dataU8: simpleCopyU8(cached.dataU8)
-          };
-        }
+    function captureSimpleFilledSlots(){
+      const liveBySlot = Object.create(null);
+      for (let slot=0; slot<64; slot++){
+        const snap = simpleSlotSnapshot(slot);
+        if (!snap) continue;
+        liveBySlot[slot] = snap;
       }
+      const sortedTargets = Object.keys(liveBySlot).map(n=>n|0).sort((a,b)=>a-b);
+      return { sortedTargets, liveBySlot };
+    }
 
-      const fresh = simpleCopyU8(liveRec.dataU8);
-      SIMPLE_MODE_RUNTIME.sources[slot] = { dataU8: simpleCopyU8(fresh) };
-      SIMPLE_MODE_RUNTIME.source = { slot, dataU8: simpleCopyU8(fresh) };
-      return {
-        slot,
-        name: liveRec.name,
-        heat: liveRec.heat,
-        dataU8: fresh
-      };
+    function resolveReactiveSimpleTargets(){
+      const filled = captureSimpleFilledSlots();
+      const selectedSlots = Array.from(SELECTED || [])
+        .map(n=>n|0)
+        .filter(s=>s>=0 && s<64)
+        .sort((a,b)=>a-b);
+      return dpResolveReactiveTargetPlan(selectedSlots, filled.liveBySlot);
+    }
+
+    function simpleTableInteraction(){
+      return dpSimpleNormTableInteraction(SIMPLE_MODE_STATE.tableInteraction);
+    }
+
+    function bakeCurrentTableModeState(){
+      if (SIMPLE_MODE_RUNTIME.gesture) return false;
+      const neutralized = dpSimpleNeutralizedState(SIMPLE_MODE_STATE);
+      const stateChanged = !dpSimpleModeStatesMatch(SIMPLE_MODE_STATE, neutralized);
+      dpInvalidateSimpleModeSources(SIMPLE_MODE_RUNTIME, { cancelGesture:true });
+      if (stateChanged) dpPersistSimpleModeState(neutralized);
+      return stateChanged;
+    }
+
+    function prepareSimpleControlBoundary(nextControlId){
+      if (SIMPLE_MODE_RUNTIME.gesture) return false;
+      const nextId = String(nextControlId || '');
+      const prevId = String(SIMPLE_MODE_RUNTIME.lastControlId || '');
+      if (!nextId || !prevId || prevId === nextId) return false;
+      return bakeCurrentTableModeState();
+    }
+
+    function prepareSimpleStructuralBoundary(){
+      if (SIMPLE_MODE_RUNTIME.gesture) return false;
+      return bakeCurrentTableModeState();
+    }
+
+    function captureSimpleBase(liveRec, index, count){
+      return dpSimpleCaptureBaseFromRuntime(SIMPLE_MODE_RUNTIME, liveRec, SIMPLE_MODE_STATE, index, count);
+    }
+
+    function applySimplePreviewRecord(slot, name, heat, nextU8){
+      const editorSlot = EDIT.slot|0;
+      const rec = attachDisplayRot({ name, dataU8: nextU8, user:true }, false);
+      rec._dpHeat = heat;
+      LIB.waves[slot] = rec;
+      LIB.userWaves[slot] = rec;
+
+      if (slot === editorSlot){
+        EDIT.name = name;
+        EDIT._dpHeat = heat;
+        EDIT.dataU8 = simpleCopyU8(rec.dataU8);
+        if (nameIn) nameIn.value = (EDIT.name || 'WAVE').toUpperCase();
+        return true;
+      }
+      return false;
     }
 
     function applyPendingSimplePreview(){
@@ -962,9 +1969,36 @@ root.__digiproApplySimpleModeState = function(next){
 
       const targets = gesture.targets;
       const targetCount = targets.length|0;
-      const editorSlot = EDIT.slot|0;
       let activeTouched = false;
       let changed = false;
+
+      if (gesture.interaction === 'anchor'){
+        for (let i=0;i<targetCount;i++){
+          const slot = targets[i]|0;
+          const capture = gesture.capture;
+          const meta = capture && capture.bySlot ? capture.bySlot[slot] : null;
+          if (!meta || !meta.liveU8 || !meta.liveU8.length) continue;
+
+          const liveRec = simpleSlotSnapshot(slot);
+          const nextU8 = dpRenderReactiveSimpleSlot(capture, slot, SIMPLE_MODE_STATE);
+          if (!nextU8 || !nextU8.length) continue;
+          if (!liveRec || !dpSimpleWaveMatches(nextU8, liveRec.dataU8)) changed = true;
+
+          const sourceRec = gesture.liveBySlot[slot] || {
+            name: String(LIB.waves[slot] && LIB.waves[slot].name || 'WAVE'),
+            heat: (LIB.waves[slot] && typeof LIB.waves[slot]._dpHeat === 'number' && isFinite(LIB.waves[slot]._dpHeat) && LIB.waves[slot]._dpHeat > 0)
+              ? LIB.waves[slot]._dpHeat
+              : 1
+          };
+          if (applySimplePreviewRecord(slot, sourceRec.name, sourceRec.heat, nextU8)) activeTouched = true;
+          paintGridCell(slot);
+        }
+
+        if (activeTouched) paint();
+        try{ if (typeof requestWavetableViewportDraw === 'function') requestWavetableViewportDraw(); }catch(_){ }
+        if (changed) gesture.changed = true;
+        return changed;
+      }
 
       for (let i=0;i<targetCount;i++){
         const slot = targets[i]|0;
@@ -975,19 +2009,11 @@ root.__digiproApplySimpleModeState = function(next){
         const slotState = dpSimpleFanoutState(SIMPLE_MODE_STATE, i, targetCount);
         const nextU8 = dpApplySimpleModeStateU8(baseRec.dataU8, slotState);
         if (!liveRec || !dpSimpleWaveMatches(nextU8, liveRec.dataU8)) changed = true;
-
-        const rec = attachDisplayRot({ name: baseRec.name, dataU8: nextU8, user:true }, false);
-        rec._dpHeat = baseRec.heat;
-        LIB.waves[slot] = rec;
-        LIB.userWaves[slot] = rec;
-
-        if (slot === editorSlot){
-          activeTouched = true;
-          EDIT.name = baseRec.name;
-          EDIT._dpHeat = baseRec.heat;
-          EDIT.dataU8 = simpleCopyU8(rec.dataU8);
-          if (nameIn) nameIn.value = (EDIT.name || 'WAVE').toUpperCase();
-        }
+        SIMPLE_MODE_RUNTIME.sources[slot] = {
+          dataU8: simpleCopyU8(baseRec.dataU8),
+          resultU8: simpleCopyU8(nextU8)
+        };
+        if (applySimplePreviewRecord(slot, baseRec.name, baseRec.heat, nextU8)) activeTouched = true;
 
         paintGridCell(slot);
       }
@@ -1016,12 +2042,50 @@ root.__digiproApplySimpleModeState = function(next){
       });
     }
 
-    function beginSimpleGesture(label){
+    function beginSimpleGesture(label, opts){
       if (SIMPLE_MODE_RUNTIME.gesture) return SIMPLE_MODE_RUNTIME.gesture;
-
-      const resolved = resolveSimpleTargets();
+      const interaction = simpleTableInteraction();
+      const resolved = (interaction === 'anchor')
+        ? resolveReactiveSimpleTargets()
+        : resolveSimpleTargets();
       const targets = resolved.targets || [];
       if (!targets.length) return null;
+      const controlId = (opts && opts.controlId != null) ? String(opts.controlId) : '';
+
+      if (interaction === 'anchor'){
+        const capture = dpBuildReactiveSimpleCapture({
+          targets,
+          liveBySlot: resolved.liveBySlot,
+          anchorSlots: resolved.anchorSlots,
+          guideSlots: resolved.guideSlots,
+          startState: SIMPLE_MODE_STATE,
+          softAnchors: !!resolved.implicitAnchors
+        });
+        const reactive = dpEnsureReactiveSimpleModeRuntime(SIMPLE_MODE_RUNTIME);
+        reactive.capture = capture;
+        reactive.selectionSignature = resolved.selectionSignature || '';
+        reactive.anchorSignature = resolved.anchorSignature || '';
+        reactive.tableInteraction = interaction;
+
+        SIMPLE_MODE_RUNTIME.gesture = {
+          interaction,
+          scope: resolved.scope,
+          targets,
+          liveBySlot: resolved.liveBySlot,
+          anchorSlots: (resolved.anchorSlots || []).slice(),
+          guideSlots: (resolved.guideSlots || []).slice(),
+          implicitAnchors: !!resolved.implicitAnchors,
+          denseSelection: !!resolved.denseSelection,
+          selectionSignature: resolved.selectionSignature || '',
+          anchorSignature: resolved.anchorSignature || '',
+          controlId: controlId || null,
+          capture,
+          before: captureBankState(targets, { preferEditor:true, includeSimpleMode:true }),
+          label: label || dpSimpleTableInteractionInfo('anchor').label,
+          changed: false
+        };
+        return SIMPLE_MODE_RUNTIME.gesture;
+      }
 
       const baseBySlot = Object.create(null);
       for (let i=0;i<targets.length;i++){
@@ -1031,9 +2095,11 @@ root.__digiproApplySimpleModeState = function(next){
       }
 
       SIMPLE_MODE_RUNTIME.gesture = {
+        interaction,
         scope: resolved.scope,
         targets,
         baseBySlot,
+        controlId: controlId || null,
         before: captureBankState(targets, { preferEditor:true, includeSimpleMode:true }),
         label: label || 'Table Mode',
         changed: false
@@ -1045,10 +2111,15 @@ root.__digiproApplySimpleModeState = function(next){
       const gesture = SIMPLE_MODE_RUNTIME.gesture;
       flushSimplePreview();
       SIMPLE_MODE_RUNTIME.gesture = null;
-      if (!gesture || !gesture.changed || !gesture.targets || !gesture.targets.length) return;
+      if (!gesture || !gesture.targets || !gesture.targets.length) return;
 
       const editorSlot = EDIT.slot|0;
       const activeTouched = gesture.targets.includes(editorSlot);
+      const after = captureBankState(gesture.targets, { includeSimpleMode:true });
+      const simpleStateChanged = gesture.before
+        ? !dpSimpleModeStatesMatch(gesture.before.simpleMode, after && after.simpleMode)
+        : false;
+      if (!gesture.changed && !simpleStateChanged) return;
 
       for (const slot of gesture.targets){
         LIB.dirty.delete(slot|0);
@@ -1066,19 +2137,32 @@ root.__digiproApplySimpleModeState = function(next){
         }
       }
 
-      const after = captureBankState(gesture.targets, { includeSimpleMode:true });
       if (gesture.before){
         bankPush({
           label: label || gesture.label || 'Table Mode',
           before: gesture.before,
-          after
+          after,
+          preserveSimpleModeSources: gesture.interaction !== 'anchor'
         });
       }
-      if (activeTouched) resetUndoToCurrent(true);
-      if (typeof announceIO === 'function' && !(JOB && JOB.running)){
-        const scopeLabel = (gesture.scope === 'selected')
-          ? `${gesture.targets.length} selected slot${gesture.targets.length===1 ? '' : 's'}`
-          : `${gesture.targets.length} filled slot${gesture.targets.length===1 ? '' : 's'}`;
+      SIMPLE_MODE_RUNTIME.lastControlId = gesture.controlId || null;
+      if (activeTouched && gesture.changed) resetUndoToCurrent(true);
+      if (gesture.changed && typeof announceIO === 'function' && !(JOB && JOB.running)){
+        let scopeLabel = `${gesture.targets.length} filled slot${gesture.targets.length===1 ? '' : 's'}`;
+        if (gesture.interaction === 'anchor'){
+          if (gesture.implicitAnchors){
+            scopeLabel = (gesture.guideSlots && gesture.guideSlots.length)
+              ? `${gesture.targets.length} filled slot${gesture.targets.length===1 ? '' : 's'} with ${gesture.guideSlots.length} guide slot${gesture.guideSlots.length===1 ? '' : 's'}`
+              : `whole-table flow across ${gesture.targets.length} filled slot${gesture.targets.length===1 ? '' : 's'}`;
+          } else if (gesture.anchorSlots && gesture.anchorSlots.length >= 2){
+            scopeLabel = `${gesture.anchorSlots.length} anchor slot${gesture.anchorSlots.length===1 ? '' : 's'} across ${gesture.targets.length} filled slot${gesture.targets.length===1 ? '' : 's'}`;
+            if (gesture.guideSlots && gesture.guideSlots.length){
+              scopeLabel += ` with ${gesture.guideSlots.length} guide slot${gesture.guideSlots.length===1 ? '' : 's'}`;
+            }
+          }
+        } else if (gesture.scope === 'selected'){
+          scopeLabel = `${gesture.targets.length} selected slot${gesture.targets.length===1 ? '' : 's'}`;
+        }
         announceIO(`${label || gesture.label || 'Table Mode'} applied to ${scopeLabel}.`);
       }
       updateButtonsState();
@@ -1089,6 +2173,17 @@ root.__digiproApplySimpleModeState = function(next){
     const simpleModeToggle = el('button','btn btn-small mm-simple-toggle');
     simpleModeToggle.type = 'button';
     simpleModeToggle.textContent = 'Table Mode';
+    const simpleInteractionWrap = el('label','mm-simple-interaction');
+    const simpleInteractionLabel = el('span','mm-simple-interaction-label');
+    simpleInteractionLabel.textContent = 'Behavior';
+    const simpleInteractionSelect = el('select','mm-simple-interaction-select');
+    [['classic', dpSimpleTableInteractionInfo('classic').label], ['anchor', dpSimpleTableInteractionInfo('anchor').label]].forEach(([value, label])=>{
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      simpleInteractionSelect.appendChild(opt);
+    });
+    simpleInteractionWrap.append(simpleInteractionLabel, simpleInteractionSelect);
     const simpleMorphWrap = el('label','mm-simple-morph');
     const simpleMorphLabel = el('span','mm-simple-morph-label');
     simpleMorphLabel.textContent = 'Morph';
@@ -1104,24 +2199,39 @@ root.__digiproApplySimpleModeState = function(next){
     const simpleReset = el('button','btn btn-small mm-simple-reset');
     simpleReset.type = 'button';
     simpleReset.textContent = 'Reset';
-    simpleReset.title = 'Reset Table Mode controls to their neutral defaults.';
+    simpleReset.title = 'Reset Table Mode controls and modes to their neutral defaults.';
 
     const simpleSliders = el('div','mm-simple-sliders');
     const simpleRefs = new Map();
 
     function refreshSimpleControls(){
       try{ simpleMorphSelect.value = SIMPLE_MODE_STATE.morph; }catch(_){ }
+      try{ simpleInteractionSelect.value = dpSimpleNormTableInteraction(SIMPLE_MODE_STATE.tableInteraction); }catch(_){ }
       for (const ctl of DP_SIMPLE_MODE_CONTROLS){
         const ref = simpleRefs.get(ctl.id);
         if (!ref) continue;
         const v = SIMPLE_MODE_STATE[ctl.id]|0;
+        const mode = dpSimpleGetControlMode(SIMPLE_MODE_STATE, ctl.id);
+        const modeInfo = dpSimpleControlModeInfo(mode);
+        const valueText = dpSimpleValueText(ctl.id, v);
         const disabledReason = dpSimpleControlDisabledReason(ctl.id, SIMPLE_MODE_STATE.morph);
         const isDisabled = !!disabledReason;
         ref.input.value = String(v);
         ref.input.disabled = isDisabled;
-        ref.input.setAttribute('aria-valuetext', dpSimpleValueText(ctl.id, v));
-        ref.input.title = isDisabled ? disabledReason : `${ctl.label}: ${dpSimpleValueText(ctl.id, v)}`;
-        ref.value.textContent = dpSimpleValueText(ctl.id, v);
+        ref.input.setAttribute('aria-valuetext', valueText);
+        ref.input.title = isDisabled ? disabledReason : `${ctl.label}: ${valueText} (${modeInfo.label})`;
+        ref.value.textContent = valueText;
+        if (ref.label){
+          const labelTitle = dpSimpleControlModeTitle(ctl.label, modeInfo.id);
+          ref.label.textContent = ctl.label;
+          ref.label.dataset.mode = modeInfo.id;
+          ref.label.dataset.modeShort = modeInfo.short;
+          ref.label.setAttribute('aria-label', labelTitle);
+          ref.label.setAttribute('aria-pressed', modeInfo.id === 'excite' ? 'true' : 'false');
+          ref.label.title = labelTitle;
+          ref.label.classList.toggle('is-lock', modeInfo.id === 'lock');
+          ref.label.classList.toggle('is-excite', modeInfo.id === 'excite');
+        }
         if (ref.card){
           ref.card.classList.toggle('is-disabled', isDisabled);
           ref.card.setAttribute('aria-disabled', isDisabled ? 'true' : 'false');
@@ -1134,8 +2244,8 @@ root.__digiproApplySimpleModeState = function(next){
     function syncSimpleModeUi(){
       const isSimple = SIMPLE_MODE_STATE.mode === 'simple';
       const toggleTitle = isSimple
-        ? 'Table Mode is active. Click to return to the classic FX grid. Shortcut: Shift-click the status line.'
-        : 'Classic FX grid is active. Click to open Table Mode. Shortcut: Shift-click the status line.';
+        ? 'Table Mode is active. Click to return to the classic FX grid. Shortcut: A, or Shift-click the status line.'
+        : 'Classic FX grid is active. Click to open Table Mode. Shortcut: A, or Shift-click the status line.';
       if (statusRow){
         statusRow.classList.toggle('is-simple', isSimple);
         statusRow.title = toggleTitle;
@@ -1152,6 +2262,7 @@ root.__digiproApplySimpleModeState = function(next){
       simplePanel.classList.toggle('is-active', isSimple);
       refreshSimpleControls();
     }
+    root.__digiproRefreshSimpleModeUi = syncSimpleModeUi;
 
     function applySimpleImmediate(label){
       beginSimpleGesture(label);
@@ -1162,6 +2273,7 @@ root.__digiproApplySimpleModeState = function(next){
 
     function toggleSimpleMode(){
       commitSimpleGesture();
+      dpInvalidateSimpleModeSources(SIMPLE_MODE_RUNTIME, { cancelGesture:true });
       if (SIMPLE_MODE_STATE.mode === 'simple'){
         dpPersistSimpleModeState(Object.assign({}, SIMPLE_MODE_STATE, { mode:'classic' }));
       } else {
@@ -1169,10 +2281,12 @@ root.__digiproApplySimpleModeState = function(next){
         // previously saved slider values never reshape the current wavetable implicitly.
         const next = dpSimpleDefaultState();
         next.mode = 'simple';
+        next.tableInteraction = simpleTableInteraction();
         dpPersistSimpleModeState(next);
       }
       syncSimpleModeUi();
     }
+    root.__digiproToggleSimpleMode = toggleSimpleMode;
 
     statusRow.onclick = (ev)=>{
       if (ev && ev.shiftKey){
@@ -1189,8 +2303,19 @@ root.__digiproApplySimpleModeState = function(next){
       toggleSimpleMode();
     });
 
+    simpleInteractionSelect.addEventListener('change', ()=>{
+      commitSimpleGesture();
+      prepareSimpleStructuralBoundary();
+      dpPersistSimpleModeState(Object.assign({}, SIMPLE_MODE_STATE, {
+        tableInteraction: simpleInteractionSelect.value
+      }));
+      dpInvalidateSimpleModeSources(SIMPLE_MODE_RUNTIME, { cancelGesture:true });
+      syncSimpleModeUi();
+    });
+
     simpleMorphSelect.addEventListener('change', ()=>{
-      beginSimpleGesture('Simple Morph');
+      if (prepareSimpleStructuralBoundary()) syncSimpleModeUi();
+      beginSimpleGesture('Simple Morph', { controlId:'morph' });
       dpPersistSimpleModeState(Object.assign({}, SIMPLE_MODE_STATE, {
         morph: simpleMorphSelect.value
       }));
@@ -1201,13 +2326,15 @@ root.__digiproApplySimpleModeState = function(next){
       beginSimpleGesture('Simple Reset');
       const next = dpSimpleDefaultState();
       next.mode = SIMPLE_MODE_STATE.mode;
+      next.tableInteraction = simpleTableInteraction();
       dpPersistSimpleModeState(next);
       applySimpleImmediate('Simple Reset');
     };
 
     for (const ctl of DP_SIMPLE_MODE_CONTROLS){
       const card = el('div','mm-simple-slider');
-      const labelEl = el('div','mm-simple-slider-label');
+      const labelEl = el('button','mm-simple-slider-label');
+      labelEl.type = 'button';
       labelEl.textContent = ctl.label;
       const track = el('div','mm-simple-slider-track');
       const input = el('input','mm-simple-range');
@@ -1224,15 +2351,28 @@ root.__digiproApplySimpleModeState = function(next){
       valueEl.textContent = dpSimpleValueText(ctl.id, SIMPLE_MODE_STATE[ctl.id]|0);
 
       const gestureLabel = `Simple ${ctl.label}`;
+      const modeGestureLabel = `${ctl.label} Mode`;
       const startGesture = ()=>{
-        if (!SIMPLE_MODE_RUNTIME.gesture) beginSimpleGesture(gestureLabel);
+        if (!SIMPLE_MODE_RUNTIME.gesture){
+          if (prepareSimpleControlBoundary(ctl.id)) syncSimpleModeUi();
+          beginSimpleGesture(gestureLabel, { controlId: ctl.id });
+        }
       };
       const finishGesture = ()=>{
         commitSimpleGesture(gestureLabel);
         syncSimpleModeUi();
       };
 
-      input.addEventListener('pointerdown', ()=>{ startGesture(); });
+      labelEl.addEventListener('click', (ev)=>{
+        if (ev){
+          ev.preventDefault();
+          ev.stopPropagation();
+        }
+        if (prepareSimpleControlBoundary(ctl.id)) syncSimpleModeUi();
+        beginSimpleGesture(modeGestureLabel, { controlId: ctl.id });
+        dpPersistSimpleModeState(dpSimpleToggleControlMode(SIMPLE_MODE_STATE, ctl.id));
+        applySimpleImmediate(modeGestureLabel);
+      });
       input.addEventListener('input', ()=>{
         startGesture();
         const nextValue = Math.max(ctl.min, Math.min(ctl.max, parseInt(input.value, 10) || 0));
@@ -1253,7 +2393,7 @@ root.__digiproApplySimpleModeState = function(next){
       track.appendChild(input);
       card.append(labelEl, track, valueEl);
       simpleSliders.appendChild(card);
-      simpleRefs.set(ctl.id, { card, input, value: valueEl });
+      simpleRefs.set(ctl.id, { card, label: labelEl, input, value: valueEl });
     }
 
     root.__digiproBeforeUndoRedo = ()=>{
@@ -1262,7 +2402,7 @@ root.__digiproApplySimpleModeState = function(next){
       syncSimpleModeUi();
     };
 
-    simpleTop.append(simpleMorphWrap, simpleReset);
+    simpleTop.append(simpleInteractionWrap, simpleMorphWrap, simpleReset);
     simplePanel.append(simpleTop, simpleSliders);
     toolsSwap.append(tools, simplePanel);
 

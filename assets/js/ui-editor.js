@@ -358,9 +358,6 @@ function dpResolveReactiveSelectionPlan(selectedSlots, liveBySlot){
     const rec = live[slot];
     return !!(rec && rec.dataU8 && rec.dataU8.length);
   });
-  const middleSlots = (selectedFilledSlots.length > 2)
-    ? selectedFilledSlots.slice(1, -1)
-    : [];
   const denseSelection = (totalFilledSlots.length > 0)
     && (selectedFilledSlots.length > 3)
     && (selectedFilledSlots.length >= Math.min(
@@ -377,14 +374,13 @@ function dpResolveReactiveSelectionPlan(selectedSlots, liveBySlot){
       guideSlots: []
     };
   }
-  const useGuideSlots = middleSlots.length > 0 && (!denseSelection || middleSlots.length <= 3);
   return {
     selectedSlots: selected,
     selectedFilledSlots,
     totalFilledSlots,
     denseSelection,
-    anchorSlots: [selectedFilledSlots[0], selectedFilledSlots[selectedFilledSlots.length - 1]],
-    guideSlots: useGuideSlots ? middleSlots : []
+    anchorSlots: selectedFilledSlots.slice(),
+    guideSlots: []
   };
 }
 
@@ -893,11 +889,18 @@ function dpSimpleStateDeltaAmount(state, baseState){
 function dpSimpleReactiveResidualWeight(meta, motionAmt, baseKeep){
   const keepFloor = Math.max(0, Math.min(1, Number(baseKeep)));
   const influence = Math.max(0, Math.min(1, Number(meta && meta.influence)));
-  let slotKeep = Math.max(keepFloor, keepFloor + ((1 - influence) * 0.28));
+  let slotKeep = Math.max(keepFloor, keepFloor + ((1 - influence) * 0.18));
   let motion = Math.max(0, Math.min(1, Number(motionAmt) || 0));
+  motion = 1 - Math.pow(1 - motion, 2.1 + (influence * 0.8));
+  const referenceDeviation = Math.max(0, Number(meta && meta.referenceDeviation) || 0);
+  if (referenceDeviation > 1e-6){
+    const anchorPull = Math.max(0, Math.min(1, referenceDeviation / 42));
+    slotKeep *= Math.max(0.08, 1 - (anchorPull * 0.86));
+    motion = 1 - Math.pow(1 - motion, 1 + (anchorPull * 1.2));
+  }
   if (meta && meta.selectedGuide){
-    slotKeep = Math.min(slotKeep, Math.max(0.02, keepFloor * 0.35));
-    motion = 1 - Math.pow(1 - motion, 2.35);
+    slotKeep = Math.min(slotKeep, Math.max(0.01, keepFloor * 0.22));
+    motion = 1 - Math.pow(1 - motion, 1.35);
   }
   return slotKeep + ((1 - motion) * (1 - slotKeep));
 }
@@ -988,6 +991,7 @@ function dpBuildReactiveSimpleCapture(opts){
   const anchored = anchorSlots.length >= 2;
   const capture = {
     anchored,
+    explicitAnchors: anchored && !!opts.explicitAnchors,
     softAnchors: anchored && softAnchors,
     startState,
     morph: startState.morph,
@@ -1066,7 +1070,9 @@ function dpBuildReactiveSimpleCapture(opts){
       });
       segmentGuideSet.add(slot);
     }
-    const guide = dpFindReactiveSegmentGuide(orderedTargets, prevIdx, nextIdx, liveBySlot, startState.morph);
+    const guide = capture.explicitAnchors
+      ? null
+      : dpFindReactiveSegmentGuide(orderedTargets, prevIdx, nextIdx, liveBySlot, startState.morph);
     if (guide && !segmentGuideSet.has(guide.slot|0)){
       const guideRec = liveBySlot[guide.slot];
       segmentGuides.push(Object.assign({}, guide, {
@@ -1146,7 +1152,9 @@ function dpBuildReactiveSimpleCapture(opts){
         liveU8: dpSimpleCopyWaveU8(liveRec.dataU8),
         referenceU8,
         startApproxU8,
-        residual: isAnchor ? new Int16Array(0) : dpSimpleResidualFromReference(liveRec.dataU8, startApproxU8),
+        residual: (isAnchor || capture.explicitAnchors)
+          ? new Int16Array(0)
+          : dpSimpleResidualFromReference(liveRec.dataU8, startApproxU8),
         prevAnchorSlot: prevSlot,
         nextAnchorSlot: nextSlot,
         segmentId,
@@ -1155,7 +1163,8 @@ function dpBuildReactiveSimpleCapture(opts){
         selectedGuide: !isAnchor && forcedGuideSet.has(slot),
         guide: isGuide,
         t,
-        influence
+        influence,
+        referenceDeviation: isAnchor ? 0 : dpSimpleWaveMeanAbsDiff(liveRec.dataU8, referenceU8)
       };
       seen.add(slot);
     }
@@ -1183,14 +1192,11 @@ function dpRenderReactiveSimpleSlot(capture, slot, state){
       ? dpSimpleFanoutState(currentState, meta.index|0, meta.count|0)
       : dpSimpleStateFromPositionalAmount(currentState, meta.influence))
     : dpSimpleFanoutState(currentState, meta.index|0, meta.count|0);
-  let reactiveReferenceU8 = meta.referenceU8;
-  if (meta.anchored && renderCache && renderCache.segmentPoints){
-    const segPoints = renderCache.segmentPoints[meta.segmentId|0];
-    if (Array.isArray(segPoints) && segPoints.length){
-      reactiveReferenceU8 = dpResolveReactiveSegmentReference(segPoints, meta.t, currentState.morph).referenceU8;
-    }
-  }
-  const targetApproxU8 = dpApplySimpleModeStateU8(reactiveReferenceU8, slotState);
+  // `meta.referenceU8` is already the captured base flow for this slot.
+  // Re-resolving from transformed segment points here would apply the current
+  // table move twice to non-anchor slots, making neighbors overshoot the
+  // selected anchors instead of forming one continuous flow.
+  const targetApproxU8 = dpApplySimpleModeStateU8(meta.referenceU8, slotState);
 
   if (!meta.anchored){
     return dpSimpleApplyResidualU8(targetApproxU8, meta.residual, 1, meta.liveU8);
@@ -2059,7 +2065,8 @@ function simpleSlotSnapshotForSelection(slot){
           anchorSlots: resolved.anchorSlots,
           guideSlots: resolved.guideSlots,
           startState: SIMPLE_MODE_STATE,
-          softAnchors: !!resolved.implicitAnchors
+          softAnchors: true,
+          explicitAnchors: (resolved.anchorSlots || []).length >= 2 && !resolved.implicitAnchors
         });
         const reactive = dpEnsureReactiveSimpleModeRuntime(SIMPLE_MODE_RUNTIME);
         reactive.capture = capture;
